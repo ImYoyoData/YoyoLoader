@@ -1,0 +1,188 @@
+#include "hook_engine.h"
+
+#include <cstring>
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <sys/mman.h>
+#  include <unistd.h>
+#endif
+
+namespace yoyo {
+namespace {
+
+constexpr size_t kPageSize = 4096;
+constexpr size_t kJumpSize = 14; /* FF 25 00 00 00 00 + abs64 */
+
+size_t page_start(size_t value) {
+    return value & ~(kPageSize - 1);
+}
+
+bool make_writable(void* address, size_t size, uintptr_t& old_state) {
+#ifdef _WIN32
+    DWORD old_protect = 0;
+    if (!VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        return false;
+    }
+    old_state = old_protect;
+    return true;
+#else
+    uintptr_t start = page_start(reinterpret_cast<uintptr_t>(address));
+    uintptr_t end = page_start(reinterpret_cast<uintptr_t>(address) + size - 1) + kPageSize;
+    if (mprotect(reinterpret_cast<void*>(start), end - start, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        return false;
+    }
+    old_state = PROT_READ | PROT_EXEC;
+    return true;
+#endif
+}
+
+bool restore_protection(void* address, size_t size, uintptr_t old_state) {
+#ifdef _WIN32
+    DWORD old_protect = 0;
+    return VirtualProtect(address, size, static_cast<DWORD>(old_state), &old_protect) != 0;
+#else
+    uintptr_t start = page_start(reinterpret_cast<uintptr_t>(address));
+    uintptr_t end = page_start(reinterpret_cast<uintptr_t>(address) + size - 1) + kPageSize;
+    return mprotect(reinterpret_cast<void*>(start), end - start, static_cast<int>(old_state)) == 0;
+#endif
+}
+
+void flush_code(void* address, size_t size) {
+#ifdef _WIN32
+    FlushInstructionCache(GetCurrentProcess(), address, size);
+#else
+    __builtin___clear_cache(static_cast<char*>(address), static_cast<char*>(address) + size);
+#endif
+}
+
+void write_absolute_jump(uint8_t* at, const void* destination) {
+    /* FF 25 00 00 00 00       jmp qword ptr [rip+0]
+     * <64-bit destination>
+     */
+    at[0] = 0xFF;
+    at[1] = 0x25;
+    at[2] = 0x00;
+    at[3] = 0x00;
+    at[4] = 0x00;
+    at[5] = 0x00;
+    uintptr_t value = reinterpret_cast<uintptr_t>(destination);
+    std::memcpy(at + 6, &value, sizeof(value));
+}
+
+} // namespace
+
+void* alloc_executable(size_t size) {
+#ifdef _WIN32
+    return VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+#else
+    void* result = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return result == MAP_FAILED ? nullptr : result;
+#endif
+}
+
+void free_executable(void* ptr, size_t size) {
+    if (ptr == nullptr) {
+        return;
+    }
+#ifdef _WIN32
+    (void)size;
+    VirtualFree(ptr, 0, MEM_RELEASE);
+#else
+    munmap(ptr, size);
+#endif
+}
+
+bool install_inline_hook(InlineHook& hook,
+                         void* target,
+                         const uint8_t* expected,
+                         size_t expected_length,
+                         void* detour) {
+    if (target == nullptr || expected == nullptr || detour == nullptr || expected_length < kJumpSize) {
+        return false;
+    }
+    auto* code = static_cast<uint8_t*>(target);
+    if (std::memcmp(code, expected, expected_length) != 0) {
+        return false;
+    }
+
+    void* trampoline = alloc_executable(expected_length + kJumpSize);
+    if (trampoline == nullptr) {
+        return false;
+    }
+    auto* tramp = static_cast<uint8_t*>(trampoline);
+    std::memcpy(tramp, code, expected_length);
+    write_absolute_jump(tramp + expected_length,
+                        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(target) + expected_length));
+
+    uintptr_t old_state = 0;
+    if (!make_writable(code, expected_length, old_state)) {
+        free_executable(trampoline, expected_length + kJumpSize);
+        return false;
+    }
+    std::memcpy(hook.original, code, expected_length);
+    write_absolute_jump(code, detour);
+    for (size_t i = kJumpSize; i < expected_length; ++i) {
+        code[i] = 0x90;
+    }
+    flush_code(code, expected_length);
+    restore_protection(code, expected_length, old_state);
+
+    hook.target = target;
+    hook.trampoline = trampoline;
+    hook.patch_length = expected_length;
+    hook.installed = true;
+    return true;
+}
+
+bool install_vtable_hook(void* object,
+                         int slot,
+                         void* detour,
+                         void** original,
+                         const uint8_t* expected,
+                         size_t expected_length,
+                         const char** error) {
+    if (object == nullptr || original == nullptr || detour == nullptr || slot < 0 || slot > 4096) {
+        if (error) {
+            *error = "invalid arguments";
+        }
+        return false;
+    }
+    auto** vtable = *reinterpret_cast<void***>(object);
+    if (vtable == nullptr) {
+        if (error) {
+            *error = "object has no vtable";
+        }
+        return false;
+    }
+    void* current = vtable[slot];
+    if (current == nullptr) {
+        if (error) {
+            *error = "vtable slot is null";
+        }
+        return false;
+    }
+    if (expected != nullptr && expected_length > 0 && std::memcmp(current, expected, expected_length) != 0) {
+        if (error) {
+            *error = "vtable slot prologue mismatch";
+        }
+        return false;
+    }
+
+    uintptr_t old_state = 0;
+    if (!make_writable(&vtable[slot], sizeof(void*), old_state)) {
+        if (error) {
+            *error = "cannot make vtable writable";
+        }
+        return false;
+    }
+    *original = current;
+    vtable[slot] = detour;
+    flush_code(&vtable[slot], sizeof(void*));
+    restore_protection(&vtable[slot], sizeof(void*), old_state);
+    return true;
+}
+
+} // namespace yoyo

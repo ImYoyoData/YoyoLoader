@@ -1,0 +1,15 @@
+build/
+build-linux/
+_testserver/
+_testserver_linux/
+_layouttest/
+*.log
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+_re/
+_bot/
+build-cmake/
