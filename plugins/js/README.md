@@ -16,11 +16,19 @@ under `<server>/plugins/` is evaluated at startup with a global `mc` object.
 ```js
 mc.listen("onPreJoin", (player) => { /* return false or event.cancelled = true to reject */ });
 mc.listen("onJoin", (player) => {});
-mc.listen("onChat", (player, message, event) => { /* event.cancelled = true */ });
+mc.listen("onChat", (player, message, event) => {
+    // event.cancelled = true;             // drop the chat packet
+    // event.message = "[Title] " + message; // rewrite before BDS broadcasts it
+});
 mc.listen("onLeft", (player, reason) => {});
 ```
 
 Aliases: `pre_join`, `join`, `chat`, `left`.
+
+`onChat` writes `event.message` back into the native TextPacket string in place.
+If the new text does not fit the existing native string capacity, the original
+message is kept and a warning is logged. `mc.__simulateChat(name, text)` and
+`mc.__rewriteNative(text)` are debug/self-test helpers for the same paths.
 
 Only these four events are currently fired. `mc.listen` accepts other LLSE event
 names but logs a warning; they will never fire in this build.

@@ -196,6 +196,39 @@ mc.log(form.toString());
 
 > 完整 LLSE 的实时世界 API（方块、物品、容器、实体、表单发送）还需要更多 BDS 偏移与对象布局逆向。未实现的 API 会抛出带说明的错误，不会返回伪造数据。详细审计见 [docs/API_COVERAGE.md](docs/API_COVERAGE.md)。
 
+### 自带测试插件
+
+**称号插件**：[plugins/title.js](plugins/title.js)。复制到 `<server>/plugins/title.js`，编辑 `TITLES` 表；它在 `onChat` 里设置 `event.message`，runtime 会把新消息写回原生 TextPacket，再交给 BDS 广播。
+
+```js
+const TITLES = { "YoyoTest": "[管理员]" };
+mc.listen("onChat", (player, message, event) => {
+    const title = TITLES[player.name] || "[玩家]";
+    event.message = title + " " + message;
+});
+```
+
+插件加载时会执行 `mc.__simulateChat` 和 `mc.__rewriteNative` 自测，Windows/Linux 日志分别为 `[管理员] hello world`、`short=ok long=ok`。真实聊天链路仍需要真实客户端验证：测试 bot 发出的 TextPacket 在到达 handler 前就被 BDS 丢弃。
+
+**侧边栏插件**：[plugins/sidebar_pack](plugins/sidebar_pack)。它是 BDS 原生行为包（`@minecraft/server`），每秒更新侧边栏：
+
+```bash
+python scripts/install_sidebar.py --server /path/to/bedrock-server
+```
+
+显示内容：
+
+```text
+YoyoLoader
+  TPS       20
+  TIME      630     # 游戏时间 HHMM
+  PLAYERS   1
+  ENTITIES  3
+  ITEMS     0
+```
+
+已在 Windows/Linux BDS 1.26.52.3 实测；Windows 下连接 bot 后日志为 `players=1 entities=3`。安装脚本会把行为包复制到 `behavior_packs/yoyo_sidebar` 并加入 `world_behavior_packs.json`。
+
 ## 6. 实现原理（不依赖符号文件）
 
 1. **识别版本**：Windows 从 PE 的 CodeView/RSDS 读取 GUID + age；Linux 从 ELF `PT_NOTE` 读取 GNU build-id。没有符号文件、没有 PDB、没有 DWARF。

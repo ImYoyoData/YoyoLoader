@@ -15,7 +15,7 @@
 |---|---|---|
 | `onPreJoin` | ✅ | `tryToLoadPlayer` inline hook |
 | `onJoin` | ✅ | `SetLocalPlayerAsInitialized` inline hook；player_id 已实测 |
-| `onChat` | ✅ | `TextPacket` handler inline hook；语义经 Ghidra 确认；测试 bot 的聊天包被 BDS 丢弃，需真实客户端确认 |
+| `onChat` | ✅ | `TextPacket` handler inline hook；支持 `event.message` 原位重写；测试 bot 的聊天包被 BDS 丢弃，真实客户端待确认 |
 | `onLeft` | 🟡 | `disconnectClientWithMessage` 路径（踢人/超时）可触发；客户端正常退出未覆盖 |
 | 其他 LLSE 事件 | ❌ | `mc.listen` 接受注册但会警告，不会触发 |
 
@@ -117,3 +117,10 @@
 7. 正常断线的 `_onPlayerLeft` / `ServerPlayer::disconnect` 路径。
 
 这些都需要继续用 REA + Ghidra 做定点反编译和版本签名，不能靠猜偏移实现。
+
+## 自带测试插件
+
+| 插件 | 实现方式 | 测试状态 |
+|---|---|---|
+| 称号插件 `plugins/title.js` | YoyoLoader JS + `onChat` / `event.message` 原位重写 | JS 监听与 MSVC/libc++ 原生字符串写入已自测；真实聊天包被测试 bot 丢弃，需真实客户端 |
+| 侧边栏 `plugins/sidebar_pack` | BDS 原生行为包 + `@minecraft/server` + `/scoreboard` | Windows/Linux 实测，TPS/时间/玩家/实体/掉落物每秒刷新；安装脚本 `scripts/install_sidebar.py` |

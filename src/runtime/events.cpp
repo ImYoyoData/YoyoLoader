@@ -95,11 +95,10 @@ void emit_join(PlayerView& player, uint64_t player_id, bool& cancelled) {
               static_cast<unsigned long long>(player_id), cancel);
 }
 
-void emit_chat(PlayerView& player, std::string_view message, bool& cancelled) {
-    std::string text(message);
+void emit_chat(PlayerView& player, std::string& message, bool& cancelled) {
     yoyo_chat_event event{};
     fill_player(event.player, player);
-    event.message = text.c_str();
+    event.message = message.c_str();
     int cancel = 0;
     event.cancelled = &cancel;
     call(snapshot(YOYO_EVENT_CHAT), YOYO_EVENT_CHAT, &event);

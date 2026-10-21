@@ -171,6 +171,7 @@ void text_packet_detour(void* self, const void* network_id, const void* packet) 
 
     std::string author;
     std::string message;
+    size_t message_offset = 0;
     bool recognised = false;
 
     switch (type) {
@@ -178,14 +179,16 @@ void text_packet_detour(void* self, const void* network_id, const void* packet) 
     case 7: /* Whisper */
     case 8: /* Announcement */
         author = read_string_at(body, 8);
-        message = read_string_at(body, 8 + string_size);
+        message_offset = 8 + string_size;
+        message = read_string_at(body, message_offset);
         recognised = true;
         break;
     case 0: /* Raw */
     case 3: /* Popup */
     case 5: /* Tip */
     case 6: /* SystemMessage */
-        message = read_string_at(body, 8);
+        message_offset = 8;
+        message = read_string_at(body, message_offset);
         recognised = true;
         break;
     default:
@@ -214,8 +217,18 @@ void text_packet_detour(void* self, const void* network_id, const void* packet) 
         players_upsert({player.name, player.xuid, player.address, player.runtime_id, player.handle, true});
     }
 
+    const std::string original_message = message;
     bool cancelled = false;
     emit_chat(player, message, cancelled);
+    if (!cancelled && message != original_message) {
+        auto* target = const_cast<unsigned char*>(body) + message_offset;
+        if (write_native_string(target, message, native_abi())) {
+            log_write(LogLevel::Info, "chat message rewritten for '%s'", player.name.c_str());
+        } else {
+            log_write(LogLevel::Warn, "chat rewrite did not fit the native string; keeping original");
+            message = original_message;
+        }
+    }
     if (cancelled) {
         log_write(LogLevel::Info, "chat cancelled for '%s'", player.name.c_str());
         return;

@@ -29,4 +29,10 @@ constexpr size_t native_string_size(NativeAbi abi) {
  */
 std::string_view read_native_string(const void* p, NativeAbi abi);
 
+/*
+ * Rewrite a native std::string in place.  Returns false if the new value does
+ * not fit the existing allocation; the caller must then keep the original.
+ */
+bool write_native_string(void* p, std::string_view value, NativeAbi abi);
+
 } // namespace yoyo

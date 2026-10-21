@@ -3,9 +3,11 @@
 #include "js_internal.h"
 #include "../events.h"
 #include "../log.h"
+#include "../native_string.h"
 #include "../players.h"
 #include "../runtime.h"
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -21,7 +23,7 @@ JSContext* g_context = nullptr;
 namespace {
 
 JSRuntime* g_runtime = nullptr;
-std::mutex g_mutex;
+std::recursive_mutex g_mutex;
 std::unordered_map<std::string, std::vector<JSValue>> g_listeners;
 
 std::string to_std_string(JSContext* ctx, JSValueConst value) {
@@ -155,6 +157,78 @@ JSValue mc_unsupported(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return unsupported(ctx, "this mc function is not implemented for the current BDS build");
 }
 
+JSValue mc_simulate_chat(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 2) {
+        return JS_ThrowTypeError(ctx, "mc.__simulateChat(name, message) requires two arguments");
+    }
+    PlayerView player;
+    player.name = to_std_string(ctx, argv[0]);
+    std::string message = to_std_string(ctx, argv[1]);
+    bool cancelled = false;
+    emit_chat(player, message, cancelled);
+    if (cancelled) return JS_NULL;
+    return JS_NewStringLen(ctx, message.data(), message.size());
+}
+
+JSValue mc_rewrite_native(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "mc.__rewriteNative(message) requires an argument");
+    std::string value = to_std_string(ctx, argv[0]);
+
+    bool short_ok = false;
+    bool long_ok = false;
+    std::string short_result;
+    std::string long_result;
+
+    if (native_abi() == NativeAbi::Msvc) {
+        unsigned char short_buffer[32] = {};
+        std::memcpy(short_buffer, "base", 4);
+        size_t size = 4;
+        size_t capacity = 15;
+        std::memcpy(short_buffer + 16, &size, 8);
+        std::memcpy(short_buffer + 24, &capacity, 8);
+        short_ok = write_native_string(short_buffer, value, NativeAbi::Msvc);
+        std::memcpy(&size, short_buffer + 16, 8);
+        short_result.assign(reinterpret_cast<char*>(short_buffer), size);
+
+        std::vector<char> storage(512, '\0');
+        std::memcpy(storage.data(), "base", 4);
+        unsigned char long_buffer[32] = {};
+        char* pointer = storage.data();
+        std::memcpy(long_buffer, &pointer, 8);
+        size = 4;
+        capacity = 256;
+        std::memcpy(long_buffer + 16, &size, 8);
+        std::memcpy(long_buffer + 24, &capacity, 8);
+        long_ok = write_native_string(long_buffer, value, NativeAbi::Msvc);
+        std::memcpy(&size, long_buffer + 16, 8);
+        long_result.assign(storage.data(), size);
+    } else {
+        unsigned char short_buffer[24] = {};
+        short_buffer[0] = static_cast<unsigned char>(4 << 1);
+        std::memcpy(short_buffer + 1, "base", 4);
+        short_ok = write_native_string(short_buffer, value, NativeAbi::Libcxx);
+        size_t size = short_buffer[0] >> 1;
+        short_result.assign(reinterpret_cast<char*>(short_buffer + 1), size);
+
+        std::vector<char> storage(512, '\0');
+        std::memcpy(storage.data(), "base", 4);
+        unsigned char long_buffer[24] = {};
+        uint64_t capacity_field = 259; /* odd: long flag; max = 257 */
+        size_t long_size = 4;
+        char* pointer = storage.data();
+        std::memcpy(long_buffer, &capacity_field, 8);
+        std::memcpy(long_buffer + 8, &long_size, 8);
+        std::memcpy(long_buffer + 16, &pointer, 8);
+        long_ok = write_native_string(long_buffer, value, NativeAbi::Libcxx);
+        std::memcpy(&long_size, long_buffer + 8, 8);
+        long_result.assign(storage.data(), long_size);
+    }
+
+    std::string result = "short=" + std::string(short_ok ? "ok" : "fail") + "(" + short_result +
+                         ") long=" + std::string(long_ok ? "ok" : "fail") + "(" + long_result + ")";
+    return JS_NewStringLen(ctx, result.data(), result.size());
+}
+
 void register_mc(JSContext* ctx) {
     JSValue mc = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, mc, "log", JS_NewCFunction(ctx, mc_log, "log", 1));
@@ -176,6 +250,10 @@ void register_mc(JSContext* ctx) {
     JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_unsupported, "getBlock", 1));
     JS_SetPropertyStr(ctx, mc, "getContainer", JS_NewCFunction(ctx, mc_unsupported, "getContainer", 1));
     JS_SetPropertyStr(ctx, mc, "getEntity", JS_NewCFunction(ctx, mc_unsupported, "getEntity", 1));
+    JS_SetPropertyStr(ctx, mc, "__simulateChat",
+                      JS_NewCFunction(ctx, mc_simulate_chat, "__simulateChat", 2));
+    JS_SetPropertyStr(ctx, mc, "__rewriteNative",
+                      JS_NewCFunction(ctx, mc_rewrite_native, "__rewriteNative", 1));
     JS_SetPropertyStr(ctx, mc, "version", JS_NewString(ctx, "0.2.0"));
 
     JSValue global = JS_GetGlobalObject(ctx);
@@ -264,16 +342,16 @@ bool start() {
     }
 
     try {
+        log_write(LogLevel::Info, "JS registering mc");
         register_mc(g_context);
+        log_write(LogLevel::Info, "JS registering NBT");
         register_nbt(g_context);
+        log_write(LogLevel::Info, "JS registering forms");
         register_forms(g_context);
+        log_write(LogLevel::Info, "JS loading plugins");
         load_js_plugins(g_context);
     } catch (...) {
         log_write(LogLevel::Error, "JS initialization failed");
-        JS_FreeContext(g_context);
-        g_context = nullptr;
-        JS_FreeRuntime(g_runtime);
-        g_runtime = nullptr;
         return false;
     }
     log_write(LogLevel::Info, "QuickJS ready");
@@ -321,18 +399,25 @@ void dispatch_join(const PlayerView& player, uint64_t, bool&) {
     JS_FreeValue(g_context, js_player);
 }
 
-void dispatch_chat(const PlayerView& player, std::string_view message, bool& cancelled) {
+void dispatch_chat(const PlayerView& player, std::string& message, bool& cancelled) {
     std::lock_guard lock(g_mutex);
     if (g_context == nullptr) return;
     JSValue js_player = make_player(g_context, player);
     JSValue js_message = JS_NewStringLen(g_context, message.data(), message.size());
     JSValue event = JS_NewObject(g_context);
     JS_SetPropertyStr(g_context, event, "cancelled", JS_FALSE);
+    JS_SetPropertyStr(g_context, event, "message",
+                      JS_NewStringLen(g_context, message.data(), message.size()));
     JSValue args[3] = {js_player, js_message, event};
     bool result = call_listeners_locked("onChat", 3, args);
     JSValue flag = JS_GetPropertyStr(g_context, event, "cancelled");
     if (JS_ToBool(g_context, flag) == 1) result = true;
     JS_FreeValue(g_context, flag);
+    JSValue updated = JS_GetPropertyStr(g_context, event, "message");
+    if (JS_IsString(updated)) {
+        message = to_std_string(g_context, updated);
+    }
+    JS_FreeValue(g_context, updated);
     JS_FreeValue(g_context, js_player);
     JS_FreeValue(g_context, js_message);
     JS_FreeValue(g_context, event);

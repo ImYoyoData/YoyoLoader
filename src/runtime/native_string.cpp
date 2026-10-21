@@ -59,4 +59,61 @@ std::string_view read_native_string(const void* p, NativeAbi abi) {
     return std::string_view(data, size);
 }
 
+bool write_native_string(void* p, std::string_view value, NativeAbi abi) {
+    if (p == nullptr || value.size() > kMaxString) {
+        return false;
+    }
+    auto* base = static_cast<unsigned char*>(p);
+
+    if (abi == NativeAbi::Msvc) {
+        size_t capacity = 0;
+        std::memcpy(&capacity, base + 24, sizeof(capacity));
+        char* data = nullptr;
+        size_t max_length = 0;
+        if (capacity >= 16) {
+            std::memcpy(&data, base, sizeof(data));
+            max_length = capacity;
+        } else {
+            data = reinterpret_cast<char*>(base);
+            max_length = 15;
+        }
+        if (data == nullptr || value.size() > max_length) {
+            return false;
+        }
+        std::memcpy(data, value.data(), value.size());
+        data[value.size()] = '\0';
+        size_t size = value.size();
+        std::memcpy(base + 16, &size, sizeof(size));
+        return true;
+    }
+
+    unsigned char flag = base[0];
+    if ((flag & 1u) == 0) {
+        if (value.size() > 22) {
+            return false;
+        }
+        base[0] = static_cast<unsigned char>(value.size() << 1);
+        std::memcpy(base + 1, value.data(), value.size());
+        base[1 + value.size()] = '\0';
+        return true;
+    }
+
+    uint64_t capacity_field = 0;
+    std::memcpy(&capacity_field, base, sizeof(capacity_field));
+    char* data = nullptr;
+    std::memcpy(&data, base + 16, sizeof(data));
+    if (data == nullptr || capacity_field < 3) {
+        return false;
+    }
+    size_t max_length = static_cast<size_t>(capacity_field - 2);
+    if (value.size() > max_length) {
+        return false;
+    }
+    std::memcpy(data, value.data(), value.size());
+    data[value.size()] = '\0';
+    size_t size = value.size();
+    std::memcpy(base + 8, &size, sizeof(size));
+    return true;
+}
+
 } // namespace yoyo

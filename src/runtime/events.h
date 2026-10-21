@@ -21,7 +21,7 @@ bool unregister_event(int type, yoyo_event_callback callback, void* user);
 
 void emit_pre_join(PlayerView& player, bool& cancelled);
 void emit_join(PlayerView& player, uint64_t player_id, bool& cancelled);
-void emit_chat(PlayerView& player, std::string_view message, bool& cancelled);
+void emit_chat(PlayerView& player, std::string& message, bool& cancelled);
 void emit_left(PlayerView& player, std::string_view reason);
 void emit_server_ready(const char* server_version, uintptr_t module_base);
 
