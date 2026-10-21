@@ -9,6 +9,11 @@
 - 🟡 数据模型可用，但未连接 BDS 实时世界
 - ❌ 未实现；调用会抛出带说明的错误，不会返回伪造数据
 
+> **Live API 已通过 Endstone 后端补齐。** 需要真实 Player/Block/Item/Container/
+> Entity/Forms/Scoreboard 时，使用 `endstone_plugins/` 和
+> [docs/ENDSTONE_BACKEND.md](ENDSTONE_BACKEND.md)。下表的 ✅/🟡/❌ 描述的是
+> YoyoLoader **原生 JS API** 的边界。
+
 ## 事件
 
 | LLSE 事件 | 状态 | 说明 |
@@ -124,3 +129,5 @@
 |---|---|---|
 | 称号插件 `plugins/title.js` | YoyoLoader JS + `onChat` / `event.message` 原位重写 | JS 监听与 MSVC/libc++ 原生字符串写入已自测；真实聊天包被测试 bot 丢弃，需真实客户端 |
 | 侧边栏 `plugins/sidebar_pack` | BDS 原生行为包 + `@minecraft/server` + `/scoreboard` | Windows/Linux 实测，TPS/时间/玩家/实体/掉落物每秒刷新；安装脚本 `scripts/install_sidebar.py` |
+| Endstone 称号 `endstone_plugins/yoyo_title` | Endstone `PlayerChatEvent.message` | 插件加载/启用通过；聊天包被测试 bot 丢弃，需真实客户端 |
+| Endstone 侧边栏 `endstone_plugins/yoyo_sidebar` | Endstone Scoreboard + Scheduler + live entities | Windows/Linux 实测，`SIDE_BAR` 已显示，`players=1 entities=3` |

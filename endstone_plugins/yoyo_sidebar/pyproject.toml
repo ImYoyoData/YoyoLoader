@@ -1,0 +1,12 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "endstone-yoyo-sidebar"
+version = "0.1.0"
+description = "YoyoLoader live scoreboard sidebar for Endstone"
+requires-python = ">=3.11"
+
+[project.entry-points.endstone]
+yoyo_sidebar = "endstone_yoyo_sidebar.sidebar:SidebarPlugin"

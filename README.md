@@ -30,6 +30,28 @@ Linux:    cp yoyo bedrock_server_mod
 
 > 只支持 x86-64；不支持 ARM。
 
+## 2.5 Live API 后端：Endstone
+
+为了提供**完整的实时 API**（Player / Block / Item / Container / Entity / Forms / Scoreboard），项目附带 Endstone 后端。Endstone 是 Apache-2.0，支持 BDS 1.26.52 的 Windows/Linux，已经有成熟的 fake headers 和逐版本符号表。
+
+```bash
+python scripts/setup_endstone_backend.py \
+    --server endstone_server \
+    --bds-zip /path/to/bedrock-server-1.26.52.3-win.zip \
+    --run
+```
+
+自带的两个 Endstone 插件：
+
+- `yoyo_title`：监听 `PlayerChatEvent`，修改 `event.message` 后放出（称号插件）。
+- `yoyo_sidebar`：真实 scoreboard 侧边栏，每秒刷新 TPS / 游戏时间 / 玩家 / 实体 / 掉落物。
+
+插件源码在 [endstone_plugins](endstone_plugins)，预构建 wheel 在 `dist/endstone/`，完整安装/测试记录见 [docs/ENDSTONE_BACKEND.md](docs/ENDSTONE_BACKEND.md)。
+
+> YoyoLoader 原生 runtime 与 Endstone 是两种后端，**不要同时注入同一个 bedrock_server 进程**：
+> - 需要完整 live API：用 Endstone 后端；
+> - 需要自定义注入、JS/C++/Go 事件插件、NBT/表单数据模型：用 YoyoLoader 原生 runtime。
+
 ## 3. 快速开始
 
 ### Windows
@@ -194,11 +216,17 @@ mc.log(form.toString());
 | `mc.broadcast` / `mc.runcmd` / `mc.runcmdEx` | 未实现，明确抛错 |
 | C++ / Go 插件事件 ABI | 保持兼容 |
 
-> 完整 LLSE 的实时世界 API（方块、物品、容器、实体、表单发送）还需要更多 BDS 偏移与对象布局逆向。未实现的 API 会抛出带说明的错误，不会返回伪造数据。详细审计见 [docs/API_COVERAGE.md](docs/API_COVERAGE.md)。
+> 上表描述的是 YoyoLoader **原生 JS API**。完整的实时 Player / Block / Item / Container / Entity / Forms / Scoreboard 请使用 **Endstone 后端**（见 2.5 节和 [docs/ENDSTONE_BACKEND.md](docs/ENDSTONE_BACKEND.md)）。原生 API 未实现的部分仍会抛出带说明的错误，不会返回伪造数据。详细审计见 [docs/API_COVERAGE.md](docs/API_COVERAGE.md)。
 
 ### 自带测试插件
 
-**称号插件**：[plugins/title.js](plugins/title.js)。复制到 `<server>/plugins/title.js`，编辑 `TITLES` 表；它在 `onChat` 里设置 `event.message`，runtime 会把新消息写回原生 TextPacket，再交给 BDS 广播。
+**Endstone 后端插件**（完整 live API）：
+
+- [endstone_plugins/yoyo_title](endstone_plugins/yoyo_title)：`PlayerChatEvent` 修改聊天内容，wheel 已构建。
+- [endstone_plugins/yoyo_sidebar](endstone_plugins/yoyo_sidebar)：真实 `SIDE_BAR` scoreboard，TPS/时间/玩家/实体/掉落物每秒刷新。
+- 一键安装见 2.5 节或 [docs/ENDSTONE_BACKEND.md](docs/ENDSTONE_BACKEND.md)。
+
+**YoyoLoader 原生称号插件**：[plugins/title.js](plugins/title.js)。复制到 `<server>/plugins/title.js`，编辑 `TITLES` 表；它在 `onChat` 里设置 `event.message`，runtime 会把新消息写回原生 TextPacket，再交给 BDS 广播。
 
 ```js
 const TITLES = { "YoyoTest": "[管理员]" };
@@ -210,7 +238,7 @@ mc.listen("onChat", (player, message, event) => {
 
 插件加载时会执行 `mc.__simulateChat` 和 `mc.__rewriteNative` 自测，Windows/Linux 日志分别为 `[管理员] hello world`、`short=ok long=ok`。真实聊天链路仍需要真实客户端验证：测试 bot 发出的 TextPacket 在到达 handler 前就被 BDS 丢弃。
 
-**侧边栏插件**：[plugins/sidebar_pack](plugins/sidebar_pack)。它是 BDS 原生行为包（`@minecraft/server`），每秒更新侧边栏：
+**YoyoLoader 原生侧边栏（行为包）**：[plugins/sidebar_pack](plugins/sidebar_pack)。它是 BDS 原生行为包（`@minecraft/server`），每秒更新侧边栏：
 
 ```bash
 python scripts/install_sidebar.py --server /path/to/bedrock-server

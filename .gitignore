@@ -13,3 +13,8 @@ _layouttest/
 _re/
 _bot/
 build-cmake/
+.venv-endstone/
+_endstone_server/
+_endstone_server_linux/
+__pycache__/
+*.pyc
