@@ -34,6 +34,16 @@ JSValue form_send_to(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return unsupported(ctx, "form sending is not implemented: the BDS form packet bridge is not available yet");
 }
 
+JSValue form_set_title(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc > 0) JS_SetPropertyStr(ctx, this_val, "title", JS_NewString(ctx, text_of(ctx, argv[0]).c_str()));
+    return JS_DupValue(ctx, this_val);
+}
+
+JSValue form_set_content(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc > 0) JS_SetPropertyStr(ctx, this_val, "content", JS_NewString(ctx, text_of(ctx, argv[0]).c_str()));
+    return JS_DupValue(ctx, this_val);
+}
+
 JSValue form_add_button(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSValue button = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, button, "text", JS_NewString(ctx, argc > 0 ? text_of(ctx, argv[0]).c_str() : ""));
@@ -149,6 +159,8 @@ void set_form_methods(JSContext* ctx, JSValue object, const char* array_property
         JS_SetPropertyStr(ctx, object, "addStepSlider",
                           JS_NewCFunction(ctx, form_add_step_slider, "addStepSlider", 4));
     }
+    JS_SetPropertyStr(ctx, object, "setTitle", JS_NewCFunction(ctx, form_set_title, "setTitle", 1));
+    JS_SetPropertyStr(ctx, object, "setContent", JS_NewCFunction(ctx, form_set_content, "setContent", 1));
     JS_SetPropertyStr(ctx, object, "toJSON", JS_NewCFunction(ctx, form_to_json, "toJSON", 0));
     JS_SetPropertyStr(ctx, object, "toString", JS_NewCFunction(ctx, form_to_string, "toString", 0));
     JS_SetPropertyStr(ctx, object, "sendTo", JS_NewCFunction(ctx, form_send_to, "sendTo", 2));
@@ -182,6 +194,8 @@ JSValue new_modal_form(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
     JS_SetPropertyStr(ctx, object, "cancel", JS_NewString(ctx, "Cancel"));
     JS_SetPropertyStr(ctx, object, "setConfirm", JS_NewCFunction(ctx, modal_set_confirm, "setConfirm", 1));
     JS_SetPropertyStr(ctx, object, "setCancel", JS_NewCFunction(ctx, modal_set_cancel, "setCancel", 1));
+    JS_SetPropertyStr(ctx, object, "setTitle", JS_NewCFunction(ctx, form_set_title, "setTitle", 1));
+    JS_SetPropertyStr(ctx, object, "setContent", JS_NewCFunction(ctx, form_set_content, "setContent", 1));
     JS_SetPropertyStr(ctx, object, "toJSON", JS_NewCFunction(ctx, form_to_json, "toJSON", 0));
     JS_SetPropertyStr(ctx, object, "toString", JS_NewCFunction(ctx, form_to_string, "toString", 0));
     JS_SetPropertyStr(ctx, object, "sendTo", JS_NewCFunction(ctx, form_send_to, "sendTo", 2));
@@ -212,6 +226,50 @@ JSValue set_count(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst*
     return JS_DupValue(ctx, this_val);
 }
 
+JSValue item_is_null(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_FALSE;
+}
+
+JSValue item_max_stack(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewInt32(ctx, 64);
+}
+
+JSValue block_get_pos(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    return JS_GetPropertyStr(ctx, this_val, "pos");
+}
+
+JSValue container_is_empty(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    JSValue items = JS_GetPropertyStr(ctx, this_val, "items");
+    JSValue length_value = JS_GetPropertyStr(ctx, items, "length");
+    int32_t length = 0;
+    JS_ToInt32(ctx, &length, length_value);
+    JS_FreeValue(ctx, length_value);
+    JS_FreeValue(ctx, items);
+    return JS_NewBool(ctx, length == 0);
+}
+
+JSValue container_clear(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    JS_SetPropertyStr(ctx, this_val, "items", JS_NewArray(ctx));
+    return JS_TRUE;
+}
+
+JSValue entity_get_name(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    return JS_GetPropertyStr(ctx, this_val, "name");
+}
+
+JSValue entity_get_health(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    return JS_GetPropertyStr(ctx, this_val, "health");
+}
+
+JSValue entity_set_health(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc > 0) JS_SetPropertyStr(ctx, this_val, "health", JS_DupValue(ctx, argv[0]));
+    return JS_DupValue(ctx, this_val);
+}
+
+JSValue entity_get_pos(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    return JS_GetPropertyStr(ctx, this_val, "pos");
+}
+
 JSValue new_item(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     JSValue object = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, object, "type", JS_NewString(ctx, argc > 0 ? text_of(ctx, argv[0]).c_str() : ""));
@@ -223,6 +281,9 @@ JSValue new_item(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     JS_SetPropertyStr(ctx, object, "setCount", JS_NewCFunction(ctx, set_count, "setCount", 1));
     JS_SetPropertyStr(ctx, object, "getNBT", JS_NewCFunction(ctx, get_nbt, "getNBT", 0));
     JS_SetPropertyStr(ctx, object, "setNBT", JS_NewCFunction(ctx, set_nbt, "setNBT", 1));
+    JS_SetPropertyStr(ctx, object, "isNull", JS_NewCFunction(ctx, item_is_null, "isNull", 0));
+    JS_SetPropertyStr(ctx, object, "getMaxStackSize",
+                      JS_NewCFunction(ctx, item_max_stack, "getMaxStackSize", 0));
     return object;
 }
 
@@ -232,6 +293,7 @@ JSValue new_block(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     JS_SetPropertyStr(ctx, object, "type", JS_NewString(ctx, argc > 1 ? text_of(ctx, argv[1]).c_str() : ""));
     JS_SetPropertyStr(ctx, object, "nbt", argc > 2 ? JS_DupValue(ctx, argv[2]) : JS_NewObject(ctx));
     JS_SetPropertyStr(ctx, object, "getType", JS_NewCFunction(ctx, get_type, "getType", 0));
+    JS_SetPropertyStr(ctx, object, "getPos", JS_NewCFunction(ctx, block_get_pos, "getPos", 0));
     JS_SetPropertyStr(ctx, object, "getNBT", JS_NewCFunction(ctx, get_nbt, "getNBT", 0));
     JS_SetPropertyStr(ctx, object, "setNBT", JS_NewCFunction(ctx, set_nbt, "setNBT", 1));
     return object;
@@ -320,6 +382,8 @@ JSValue new_container(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
     JS_SetPropertyStr(ctx, object, "addItem", JS_NewCFunction(ctx, container_add_item, "addItem", 1));
     JS_SetPropertyStr(ctx, object, "removeItem", JS_NewCFunction(ctx, container_remove_item, "removeItem", 1));
     JS_SetPropertyStr(ctx, object, "getAllItems", JS_NewCFunction(ctx, container_get_all, "getAllItems", 0));
+    JS_SetPropertyStr(ctx, object, "isEmpty", JS_NewCFunction(ctx, container_is_empty, "isEmpty", 0));
+    JS_SetPropertyStr(ctx, object, "clear", JS_NewCFunction(ctx, container_clear, "clear", 0));
     return object;
 }
 
@@ -330,6 +394,10 @@ JSValue new_entity(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     JS_SetPropertyStr(ctx, object, "health", argc > 2 ? JS_DupValue(ctx, argv[2]) : JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, object, "getNBT", JS_NewCFunction(ctx, get_nbt, "getNBT", 0));
     JS_SetPropertyStr(ctx, object, "setNBT", JS_NewCFunction(ctx, set_nbt, "setNBT", 1));
+    JS_SetPropertyStr(ctx, object, "getName", JS_NewCFunction(ctx, entity_get_name, "getName", 0));
+    JS_SetPropertyStr(ctx, object, "getHealth", JS_NewCFunction(ctx, entity_get_health, "getHealth", 0));
+    JS_SetPropertyStr(ctx, object, "setHealth", JS_NewCFunction(ctx, entity_set_health, "setHealth", 1));
+    JS_SetPropertyStr(ctx, object, "getPos", JS_NewCFunction(ctx, entity_get_pos, "getPos", 0));
     return object;
 }
 

@@ -70,6 +70,8 @@ double, string -> string, array -> list, object -> compound.
 ```js
 const form = mc.newSimpleForm("Title", "Content");
 form.addButton("OK", "textures/ui/check");
+form.setTitle("New title");
+form.setContent("New content");
 form.toString();      // JSON
 form.toJSON();        // object
 form.sendTo(player);  // throws: BDS form packet bridge not implemented yet
@@ -82,6 +84,8 @@ custom.addDropdown("Pick", ["a", "b"], 0);
 custom.addSlider("Amount", 0, 10, 1, 5);
 
 const modal = mc.newModalForm("Title", "Content");
+modal.setConfirm("Yes");
+modal.setCancel("No");
 ```
 
 Global constructors `SimpleForm`, `CustomForm`, `ModalForm` are also available.
@@ -92,9 +96,10 @@ Global constructors `SimpleForm`, `CustomForm`, `ModalForm` are also available.
 const item = mc.newItem("minecraft:apple", 3, nbt);
 item.getType(); item.getCount(); item.setCount(5);
 item.getNBT(); item.setNBT(nbt);
+item.isNull(); item.getMaxStackSize();
 
 const block = mc.newBlock({ x: 1, y: 64, z: 2 }, "minecraft:stone", nbt);
-block.getType(); block.getNBT(); block.setNBT(nbt);
+block.getType(); block.getPos(); block.getNBT(); block.setNBT(nbt);
 
 const container = mc.newContainer(9);
 container.addItem(item);
@@ -102,9 +107,10 @@ container.getItem(0);
 container.setItem(0, item);
 container.removeItem(0);
 container.getAllItems();
+container.isEmpty(); container.clear();
 
 const entity = mc.newEntity("Yoyo", { x: 0, y: 64, z: 0 }, 20);
-entity.name; entity.health;
+entity.getName(); entity.getHealth(); entity.setHealth(10); entity.getPos();
 ```
 
 These are **local data models**. `mc.getBlock`, `mc.getContainer`, `mc.getEntity`
@@ -117,7 +123,8 @@ are not connected to the live world yet and throw a descriptive error.
 | `mc.log(...)` | implemented |
 | `mc.listen(name, cb)` | implemented for the four events above |
 | `mc.getPlayer(nameOrXuid)` | implemented from the event registry |
-| `mc.getOnlinePlayers()` | implemented from the event registry |
+| `mc.getOnlinePlayers()` / `mc.getPlayers()` | implemented from the event registry |
+| `mc.getOnlinePlayerCount()` | implemented from the event registry |
 | `mc.getServerVersion()` | implemented (BDS build id) |
 | `mc.getModuleBase()` | implemented |
 | `mc.broadcast`, `mc.runcmd`, `mc.runcmdEx` | not implemented; throws |

@@ -194,7 +194,7 @@ mc.log(form.toString());
 | `mc.broadcast` / `mc.runcmd` / `mc.runcmdEx` | 未实现，明确抛错 |
 | C++ / Go 插件事件 ABI | 保持兼容 |
 
-> 完整 LLSE 的实时世界 API（方块、物品、容器、实体、表单发送）还需要更多 BDS 偏移与对象布局逆向。未实现的 API 会抛出带说明的错误，不会返回伪造数据。
+> 完整 LLSE 的实时世界 API（方块、物品、容器、实体、表单发送）还需要更多 BDS 偏移与对象布局逆向。未实现的 API 会抛出带说明的错误，不会返回伪造数据。详细审计见 [docs/API_COVERAGE.md](docs/API_COVERAGE.md)。
 
 ## 6. 实现原理（不依赖符号文件）
 

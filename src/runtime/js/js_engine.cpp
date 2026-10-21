@@ -139,6 +139,10 @@ JSValue mc_get_online_players(JSContext* ctx, JSValueConst, int, JSValueConst*) 
     return array;
 }
 
+JSValue mc_get_online_count(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewInt32(ctx, static_cast<int32_t>(players_online().size()));
+}
+
 JSValue mc_get_server_version(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return JS_NewString(ctx, state().module.build_id);
 }
@@ -158,6 +162,10 @@ void register_mc(JSContext* ctx) {
     JS_SetPropertyStr(ctx, mc, "getPlayer", JS_NewCFunction(ctx, mc_get_player, "getPlayer", 1));
     JS_SetPropertyStr(ctx, mc, "getOnlinePlayers",
                       JS_NewCFunction(ctx, mc_get_online_players, "getOnlinePlayers", 0));
+    JS_SetPropertyStr(ctx, mc, "getPlayers",
+                      JS_NewCFunction(ctx, mc_get_online_players, "getPlayers", 0));
+    JS_SetPropertyStr(ctx, mc, "getOnlinePlayerCount",
+                      JS_NewCFunction(ctx, mc_get_online_count, "getOnlinePlayerCount", 0));
     JS_SetPropertyStr(ctx, mc, "getServerVersion",
                       JS_NewCFunction(ctx, mc_get_server_version, "getServerVersion", 0));
     JS_SetPropertyStr(ctx, mc, "getModuleBase",
