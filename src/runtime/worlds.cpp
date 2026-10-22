@@ -21,6 +21,15 @@
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #  include <windows.h>
+#else
+#  include <arpa/inet.h>
+#  include <fcntl.h>
+#  include <netinet/in.h>
+#  include <signal.h>
+#  include <sys/prctl.h>
+#  include <sys/socket.h>
+#  include <sys/wait.h>
+#  include <unistd.h>
 #endif
 
 namespace yoyo::worlds {
@@ -36,6 +45,9 @@ struct Child {
 #ifdef _WIN32
     PROCESS_INFORMATION process{};
     HANDLE stdin_write = nullptr;
+#else
+    pid_t pid = -1;
+    int stdin_write = -1;
 #endif
     bool loaded = false;
 };
@@ -181,6 +193,7 @@ bool wait_for_port(int port, int timeout_ms) {
                 connect(socket_handle, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
             closesocket(socket_handle);
             if (connected) {
+                WSACleanup();
                 return true;
             }
         }
@@ -285,10 +298,131 @@ void stop_child(const std::string& name) {
     log_write(LogLevel::Info, "world '%s' stopped", name.c_str());
 }
 #else
-bool start_child(const Entry&) {
+bool wait_for_port(int port, int timeout_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const int socket_handle = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (socket_handle >= 0) {
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_port = htons(static_cast<unsigned short>(port));
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            const bool connected =
+                connect(socket_handle, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+            close(socket_handle);
+            if (connected) {
+                return true;
+            }
+        }
+        usleep(250000);
+    }
     return false;
 }
-void stop_child(const std::string&) {}
+
+bool start_child(const Entry& entry) {
+    const auto instance = root_dir() / "instances" / entry.name;
+    const auto exe = instance / "yoyo";
+    std::error_code error;
+    std::filesystem::create_directories(instance, error);
+    clone_tree(root_dir(), instance);
+    write_properties(root_dir(), instance, entry);
+    std::ofstream(instance / "allowlist.json") << "[]\n";
+    std::ofstream(instance / "permissions.json") << "[]\n";
+    std::ofstream(instance / "yoyo_world_child.txt") << entry.name << '\n';
+
+    int pipe_fds[2] = {-1, -1};
+    if (pipe(pipe_fds) != 0) {
+        log_write(LogLevel::Error, "world '%s': pipe failed", entry.name.c_str());
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        log_write(LogLevel::Error, "world '%s': fork failed", entry.name.c_str());
+        return false;
+    }
+    if (pid == 0) {
+        close(pipe_fds[1]);
+        dup2(pipe_fds[0], STDIN_FILENO);
+        close(pipe_fds[0]);
+        const int null_fd = open("/dev/null", O_RDWR);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDOUT_FILENO);
+            dup2(null_fd, STDERR_FILENO);
+            close(null_fd);
+        }
+        if (chdir(instance.string().c_str()) != 0) {
+            _exit(126);
+        }
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        execl(exe.string().c_str(), "yoyo", static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    close(pipe_fds[0]);
+    if (!wait_for_port(entry.port, 45000)) {
+        log_write(LogLevel::Error, "world '%s': port %d did not become ready", entry.name.c_str(), entry.port);
+        kill(pid, SIGTERM);
+        close(pipe_fds[1]);
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return false;
+    }
+
+    Child child;
+    child.pid = pid;
+    child.stdin_write = pipe_fds[1];
+    child.loaded = true;
+    g_children[entry.name] = child;
+    log_write(LogLevel::Info, "world '%s' started on port %d", entry.name.c_str(), entry.port);
+    return true;
+}
+
+void stop_child(const std::string& name) {
+    auto it = g_children.find(name);
+    if (it == g_children.end()) {
+        return;
+    }
+    auto& child = it->second;
+    if (child.stdin_write >= 0) {
+        const char stop[] = "stop\n";
+        (void)write(child.stdin_write, stop, sizeof(stop) - 1);
+        close(child.stdin_write);
+        child.stdin_write = -1;
+    }
+    bool exited = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (std::chrono::steady_clock::now() < deadline) {
+        int status = 0;
+        const pid_t result = waitpid(child.pid, &status, WNOHANG);
+        if (result == child.pid || result < 0) {
+            exited = true;
+            break;
+        }
+        usleep(200000);
+    }
+    if (!exited) {
+        kill(child.pid, SIGTERM);
+        const auto term_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < term_deadline) {
+            int status = 0;
+            const pid_t result = waitpid(child.pid, &status, WNOHANG);
+            if (result == child.pid || result < 0) {
+                exited = true;
+                break;
+            }
+            usleep(200000);
+        }
+    }
+    if (!exited) {
+        kill(child.pid, SIGKILL);
+        int status = 0;
+        waitpid(child.pid, &status, 0);
+    }
+    g_children.erase(it);
+    log_write(LogLevel::Info, "world '%s' stopped", name.c_str());
+}
 #endif
 
 Entry* find_entry(const std::string& name) {
@@ -366,12 +500,7 @@ bool load(const std::string& name) {
     if (it != g_children.end() && it->second.loaded) {
         return true;
     }
-#ifdef _WIN32
     return start_child(*entry);
-#else
-    (void)entry;
-    return false;
-#endif
 }
 
 bool unload(const std::string& name) {
@@ -379,13 +508,12 @@ bool unload(const std::string& name) {
     if (!g_controller || name == g_instance_name) {
         return false;
     }
-#ifdef _WIN32
+    auto it = g_children.find(name);
+    if (it == g_children.end() || !it->second.loaded) {
+        return false;
+    }
     stop_child(name);
     return true;
-#else
-    (void)name;
-    return false;
-#endif
 }
 
 bool switch_player(void* player, const std::string& name) {

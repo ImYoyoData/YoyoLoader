@@ -52,7 +52,7 @@ func cstr(p *C.char) string {
 
 //export yoyo_plugin_entry
 func yoyo_plugin_entry(api *C.yoyo_api) *C.yoyo_api {
-	if api == nil || uint32(api.abi_version) != 2 {
+	if api == nil || uint32(api.abi_version) != 3 {
 		return nil
 	}
 	gAPI = api

@@ -5,6 +5,7 @@
 #include "live.h"
 #include "log.h"
 #include "native_string.h"
+#include "packet_events.h"
 #include "players.h"
 #include "runtime.h"
 
@@ -154,6 +155,7 @@ void install_level_tick_hook(void*) {
 struct MoveState {
     LiveVec3 position;
     int dimension = -9999;
+    int game_mode = -1;
 };
 
 std::atomic<uint64_t> g_tick_counter{0};
@@ -188,6 +190,7 @@ void level_tick_detour(void* level) {
                     item.player.runtime_id = live_runtime_id(item.handle);
                 }
                 if (auto joined = players_mark_joined(item.player.runtime_id); joined.has_value()) {
+                    install_packet_send_hook(joined->handle);
                     PlayerView view;
                     view.handle = joined->handle;
                     view.name = joined->name;
@@ -222,8 +225,12 @@ void level_tick_detour(void* level) {
     static std::unordered_map<void*, MoveState> states;
     static std::vector<MoveEvent> moves;
     static std::vector<std::pair<PlayerView, std::pair<int, int>>> dimension_changes;
+    static std::vector<std::pair<PlayerView, int>> game_mode_changes;
+    static std::vector<std::pair<PlayerView, LiveVec3>> teleports;
     moves.clear();
     dimension_changes.clear();
+    game_mode_changes.clear();
+    teleports.clear();
 
     std::unordered_set<void*> online_handles;
     for (const auto& info : players_online()) {
@@ -243,17 +250,19 @@ void level_tick_detour(void* level) {
         view.address = info.address;
         view.runtime_id = info.runtime_id;
 
+        const int game_mode = live_get_game_mode(info.handle);
         std::lock_guard lock(state_mutex);
         auto it = states.find(info.handle);
         if (it == states.end()) {
-            states[info.handle] = {position, dimension};
+            states[info.handle] = {position, dimension, game_mode};
             continue;
         }
         const LiveVec3& old = it->second.position;
         const double dx = position.x - old.x;
         const double dy = position.y - old.y;
         const double dz = position.z - old.z;
-        const bool moved = dx * dx + dy * dy + dz * dz > 1e-4;
+        const double distance_sq = dx * dx + dy * dy + dz * dz;
+        const bool moved = distance_sq > 1e-4;
         const bool changed_dimension = it->second.dimension != dimension;
         if (changed_dimension) {
             dimension_changes.push_back({view, {it->second.dimension, dimension}});
@@ -261,7 +270,13 @@ void level_tick_detour(void* level) {
         if (moved || changed_dimension) {
             moves.push_back({view, old, position, it->second.dimension, dimension});
         }
-        it->second = {position, dimension};
+        if (!changed_dimension && distance_sq > 256.0) {
+            teleports.push_back({view, position});
+        }
+        if (it->second.game_mode >= 0 && game_mode != it->second.game_mode) {
+            game_mode_changes.push_back({view, game_mode});
+        }
+        it->second = {position, dimension, game_mode};
     }
     {
         std::lock_guard lock(state_mutex);
@@ -278,6 +293,18 @@ void level_tick_detour(void* level) {
     }
     for (auto& item : moves) {
         emit_player_move(item.player, item.from, item.to, item.from_dimension, item.to_dimension);
+    }
+    for (auto& item : game_mode_changes) {
+        DetailEvent detail;
+        detail.value = item.second;
+        emit_detail(YOYO_EVENT_PLAYER_GAME_MODE, item.first, detail);
+    }
+    for (auto& item : teleports) {
+        DetailEvent detail;
+        detail.x = static_cast<int>(item.second.x);
+        detail.y = static_cast<int>(item.second.y);
+        detail.z = static_cast<int>(item.second.z);
+        emit_detail(YOYO_EVENT_PLAYER_TELEPORT, item.first, detail);
     }
 }
 
@@ -329,6 +356,7 @@ bool try_to_load_player_detour(void* self, void* server_player, const void* conn
 
     remember_player(player);
     players_upsert({player.name, player.xuid, player.address, player.runtime_id, player.handle, false});
+    install_packet_send_hook(player.handle);
 
     bool cancelled = false;
     emit_pre_join(player, cancelled);
@@ -358,6 +386,7 @@ void disconnect_detour(void* self, const void* network_id, uint8_t sub_client_id
             player.runtime_id = info->runtime_id;
             known = true;
         }
+        packet_forget_player(handle);
         live_forget_player(handle);
     }
 
@@ -383,6 +412,7 @@ void player_left_detour(void* self, void* player, int sub_client_id) {
             view.address = info->address;
             view.runtime_id = info->runtime_id;
         }
+        packet_forget_player(player);
         live_forget_player(player);
         emit_left(view, "left");
     }
@@ -405,8 +435,11 @@ void set_local_player_initialized_detour(void* self, const void* network_id, con
         player.address = joined->address;
         player.runtime_id = joined->runtime_id != 0 ? joined->runtime_id : player_id;
     }
-    if (player.handle != nullptr && network_id != nullptr) {
-        live_set_player_network_id(player.handle, network_id, 0);
+    if (player.handle != nullptr) {
+        if (network_id != nullptr) {
+            live_set_player_network_id(player.handle, network_id, 0);
+        }
+        install_packet_send_hook(player.handle);
     }
     bool cancelled = false;
     emit_join(player, player_id, cancelled);

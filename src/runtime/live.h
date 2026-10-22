@@ -62,6 +62,8 @@ bool live_teleport(void* actor, const LiveVec3& position, int dimension);
 /* Remember the NetworkIdentifier delivered by the join packet handler. */
 void live_set_player_network_id(void* player, const void* network_id, uint8_t sub_client_id);
 void* live_take_player_for_network(const void* network_id);
+/* Non-destructive lookup used by packet events. */
+void* live_find_player_for_network(const void* network_id);
 void live_forget_player(void* player);
 
 /* Kick through ServerNetworkHandler::disconnectClientWithMessage. */

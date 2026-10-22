@@ -30,8 +30,8 @@ Linux:    cp yoyo bedrock_server_mod
 
 | 平台 | BDS | Build ID | 实测内容 |
 |---|---|---|---|
-| Windows x64 | 1.26.52.3 | `d9f9837c2108f3824c4c44205044422e1` | 注入、事件、消息/标题/Toast/表单、位置/维度、传送、踢人、正常退出事件、C++/JS 插件 |
-| Linux x64 | 1.26.52.3 | `c0ff36e2eacfc191f01e189237df71f139b5d04a` | 注入、事件、消息/标题/Toast/表单、位置/维度、传送、踢人、正常退出事件、JS 插件 |
+| Windows x64 | 1.26.52.3 | `d9f9837c2108f3824c4c44205044422e1` | 注入、事件、packet 事件、消息/标题/Toast/表单、位置/维度、传送、踢人、生命值、多世界、C++/JS 插件 |
+| Linux x64 | 1.26.52.3 | `c0ff36e2eacfc191f01e189237df71f139b5d04a` | 注入、事件、packet 事件、消息/标题/Toast/表单、位置/维度、传送、踢人、生命值、多世界、JS 插件 |
 
 测试使用 NetherNet 传输的离线 bot（Windows 与 Linux 均在 Docker 中）连接真实 BDS。
 Linux runtime 在 Debian/glibc 2.36 + clang 20 下构建并加载；建议使用 LLD 链接。
@@ -97,6 +97,23 @@ cmake --build build --config Release
 | `onTick` | `Level::tick` 内联 hook | 否 | Windows / Linux 实测 |
 | `onPlayerMove` | `Level::tick` 中轮询位置 | 否 | Windows / Linux 实测，阈值 0.01 格 |
 | `onPlayerChangeDimension` | `Level::tick` 中比较维度 | 否 | 已实现，等待跨维度场景实测 |
+| `onPlayerJump` / `onJump` | `PlayerAuthInputPacket` / `PlayerActionPacket` | 否 | 已接入，等待真实客户端验证 |
+| `onSneak` / `onChangeSprinting` | `PlayerAuthInputPacket` / `PlayerActionPacket` | 否 | 状态变化去重 |
+| `onPlayerAction` | `PlayerActionPacket` | 部分 | 原始 action；动作明细见下 |
+| `onStartDestroyBlock` / `onDestroyBlock` | `PlayerActionPacket` | 是* | 取消会丢弃该 action，不保证客户端预测回滚 |
+| `onBlockInteracted` / `onUseItem` / `onUseItemOn` / `onDropItem` | `PlayerActionPacket` | 是* | 同上 |
+| `onBedEnter` / `onBedLeave` | `PlayerActionPacket` | 是* | 同上 |
+| `onPlayerCmd` | `CommandRequestPacket` | 是 | `event.text` 为命令原文 |
+| `onFormResponse` | `ModalFormResponsePacket` | 是 | `formId` + 响应文本 |
+| `onPlayerSkinChange` / `onPlayerEmote` / `onPlayerItemHeld` | 对应 packet | 否 | 皮肤 UUID / emote piece / 槽位 |
+| `onPlayerRespawn` | `RespawnPacket` / `PlayerActionPacket` | 是* | |
+| `onPlayerTeleport` | tick 位置跳变 + `HandledTeleport` | 否 | 超过 16 格的跳变作为传送 |
+| `onPlayerGameModeChange` | tick 比较游戏模式 | 否 | |
+| `onPlayerHealthChange` / `onPlayerDie` | 出站 `SetHealth` / `DeathInfo` | 否 | 需要 `sendNetworkPacket` vtable hook |
+| `onPacketReceive` / `onPacketSend` | `createPacket` handler 包装 / 出站 vtable | 是 | 高流量包会跳过 `onPacketSend` |
+
+`*` 这些事件可以设置 `event.cancelled`，但方块/物品动作的取消只丢弃客户端 action，
+不做完整的事务回滚；正式服使用前应在真实客户端验证。
 
 `onChat` 会原地修改原生 `TextPacket` 的字符串；如果新消息超过原字符串容量，
 会保留原消息并写警告日志。不要依赖“取消后还能继续发包”的语义。
@@ -111,9 +128,13 @@ cmake --build build --config Release
 | `TextPacket` | `0x8905AD0` | `0x973B30` | 27 / 27 |
 | `_onPlayerLeft` | `0x89143F0` | `0x983800` | 22 / 27 |
 | `Level::tick`（内联） | `0xC897700` | `0x7CBFD0` | 20 / 30 |
+| `MinecraftPackets::createPacket` | `0x89FB260` | `0x93A490` | 12 / 14 |
+| `Player::sendNetworkPacket` | vtable `0x728` | vtable `0x720` | vtable slot |
 
 序言在 patch 前逐字节校验。Linux 的 `Level::tick` 序言含一条 RIP-relative 指令，
-trampoline 会重定位它，并分配在 BDS 映射附近以保证 rel32 可达。
+trampoline 会重定位它，并分配在 BDS 映射附近以保证 rel32 可达。Linux 的
+`createPacket` 前 12 字节包含一条短条件跳转，短 hook 会把它改写成近跳转；
+`Packet::handler_` 位于 Packet 基类 `+0x20`。
 
 ## 5. 实时 API（YoyoLoader 原生）
 
@@ -162,6 +183,11 @@ player.getUniqueId();                   // 原始 ActorUniqueID，可能为负�
 player.getGameMode();                   // 0 survival, 1 creative, 2 adventure, 6 spectator
 player.getGameModeName();
 player.setGameMode("creative");         // 也接受数字
+player.isSneaking();
+player.isSprinting();
+player.isFlying();
+player.getHeldItemSlot();               // 最近一次 PlayerEquipment 包
+player.getHealth();                     // 最近一次 SetHealth 包，未知时 null
 
 // 管理
 player.kick("reason");
@@ -177,6 +203,21 @@ mc.listen("onPlayerMove", (player, from, to) => {
     // from/to: { x, y, z, dimension, dimensionName }
 });
 mc.listen("onPlayerChangeDimension", (player, fromDimension, toDimension) => {});
+mc.listen("onPlayerJump", (player, event) => {});
+mc.listen("onSneak", (player, sneaking, event) => {});
+mc.listen("onChangeSprinting", (player, sprinting, event) => {});
+mc.listen("onStartDestroyBlock", (player, pos, event) => {});
+mc.listen("onDestroyBlock", (player, pos, event) => {});
+mc.listen("onBlockInteracted", (player, pos, event) => {});
+mc.listen("onUseItem", (player, event) => {});
+mc.listen("onUseItemOn", (player, pos, event) => {});
+mc.listen("onDropItem", (player, event) => {});
+mc.listen("onPlayerCmd", (player, command, event) => {});
+mc.listen("onFormResponse", (player, formId, response, event) => {});
+mc.listen("onPlayerHealthChange", (player, health, event) => {});
+mc.listen("onPlayerDie", (player, event) => {});
+mc.listen("onPacketReceive", (player, packetId, event) => {});
+mc.listen("onPacketSend", (player, packetId, event) => {});
 
 // 表单（真实下发）
 const form = mc.newSimpleForm("Title", "Content");
@@ -204,8 +245,8 @@ form.sendTo(player);
 - `mc.getBlock` / `mc.getContainer` / `mc.getEntity`
 - 实时 Block/Item/Container/Entity/Inventory 读写
 - Scoreboard、BossBar、Map、Boss Event、命令执行（`mc.runcmd` / `mc.runcmdEx`）
-- 表单响应回调（客户端提交后回传 JS callback）
-- 玩家生命值、饥饿、经验、飞行、权限、皮肤、Ping、跨维度传送
+- 表单回调到具体 Form 对象的 `onResponse`（现在有全局 `onFormResponse`）
+- 玩家饥饿、经验、权限、皮肤对象、Ping、跨维度传送、`setHealth`
 - 世界时间/天气、Level/Dimension 实时对象
 
 Item/Block/Container/Entity 的 `mc.newItem` / `mc.newBlock` / `mc.newContainer` /
@@ -255,12 +296,16 @@ OP 列表 `yoyo_ops.txt`，一行一个 XUID：
 - `switch` 会下发真实 `TransferPacket`，客户端重连到目标世界端口。
 - 子世界目录在 `instances/<name>`，服务器文件用硬链接复用（跨卷时回退为复制），
   存档目录独立。
-- 已实测：`world2` 启动为第二个 BDS 进程（19142）、卸载后进程退出；
+- Windows 已实测：`world2` 启动为第二个 BDS 进程（19142）、卸载后进程退出；
   bot 收到了目标地址/端口正确的 TransferPacket。
+- Linux 使用 `fork` + `exec` 启动 `instances/<name>/yoyo`，通过管道写 `stop`，
+  超时后 `SIGTERM`/`SIGKILL`；子进程设置 `PR_SET_PDEATHSIG`，主进程退出时
+  子世界也会收到 `SIGTERM`。该路径已通过 Linux 编译/链接检查，尚未在本轮启动服务器。
 - 真实客户端从 NetherNet 主世界重连到子世界端口的完整链路仍需要客户端实测；
   如果客户端不接受直接端口 Transfer，需要再补 NetherNet 发现/网络 ID。
 
-`load` 在等待子进程端口就绪时会阻塞主线程数秒，这是当前原型的已知代价。
+`load` / `unload` 在等待子进程端口就绪或退出时会阻塞调用线程数秒，这是当前
+原型为了简化同步的已知代价。
 
 ## 6. 插件 ABI
 
@@ -271,7 +316,7 @@ extern "C" YOYO_EXPORT
 const yoyo_api* YOYO_CALL yoyo_plugin_entry(const yoyo_api* api);
 ```
 
-完整定义见 [include/yoyo/plugin.h](include/yoyo/plugin.h)。ABI 版本 2 在事件之外增加了：
+完整定义见 [include/yoyo/plugin.h](include/yoyo/plugin.h)。ABI 版本 3 在事件之外增加了：
 
 ```c
 int (*player_send_message)(void *player, const char *message);
@@ -286,6 +331,19 @@ int (*player_send_actionbar)(void *player, const char *text);
 int (*player_send_form)(void *player, const char *json);
 int (*player_get_game_mode)(void *player);
 int (*player_set_game_mode)(void *player, int mode);
+
+/* ABI 3 */
+int (*player_get_health)(void *player);
+int (*player_is_sneaking)(void *player);
+int (*player_is_sprinting)(void *player);
+int (*player_is_flying)(void *player);
+int (*player_get_held_slot)(void *player);
+int (*player_send_tip)(void *player, const char *message);
+int (*player_send_popup)(void *player, const char *message);
+int (*player_send_system_message)(void *player, const char *message);
+int (*player_send_toast)(void *player, const char *title, const char *content);
+int (*player_reset_title)(void *player);
+int (*player_transfer)(void *player, const char *host, int port);
 ```
 
 事件 ABI 新增：
@@ -294,6 +352,9 @@ int (*player_set_game_mode)(void *player, int mode);
 YOYO_EVENT_TICK                    // const yoyo_tick_event*
 YOYO_EVENT_PLAYER_MOVE             // const yoyo_player_move_event*
 YOYO_EVENT_PLAYER_CHANGE_DIMENSION // const yoyo_player_dimension_event*
+/* ABI 3 detail events */
+YOYO_EVENT_PLAYER_JUMP .. YOYO_EVENT_PACKET_SEND
+                                   // const yoyo_detail_event*
 ```
 
 ### C++
@@ -315,7 +376,7 @@ go build -buildmode=c-shared -o sample_go.dll .
 ```
 
 `callback.c` 的 trampoline 把 C 回调转给 Go 的 `//export` 函数，并在 join 时调用
-`player_send_message`。Go 侧检查 ABI 版本 2。
+`player_send_message`。Go 侧检查 ABI 版本 3。
 
 ### JavaScript
 

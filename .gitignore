@@ -12,6 +12,7 @@ _refs/
 _re/
 _bot/
 _server/
+_tools/
 *.log
 *.obj
 *.o

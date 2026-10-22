@@ -4,6 +4,7 @@
 #include "js/js_engine.h"
 #include "live.h"
 #include "log.h"
+#include "packet_events.h"
 #include "players.h"
 #include "runtime.h"
 
@@ -111,6 +112,50 @@ int api_player_set_game_mode(void* player, int mode) {
     return live_set_game_mode(player, mode) ? 0 : 1;
 }
 
+int api_player_get_health(void* player) {
+    return packet_player_health(player);
+}
+
+int api_player_is_sneaking(void* player) {
+    return packet_player_is_sneaking(player) ? 1 : 0;
+}
+
+int api_player_is_sprinting(void* player) {
+    return packet_player_is_sprinting(player) ? 1 : 0;
+}
+
+int api_player_is_flying(void* player) {
+    return packet_player_is_flying(player) ? 1 : 0;
+}
+
+int api_player_get_held_slot(void* player) {
+    return packet_player_held_slot(player);
+}
+
+int api_player_send_tip(void* player, const char* message) {
+    return live_send_text(player, message ? message : "", LiveTextType::Tip) ? 0 : 1;
+}
+
+int api_player_send_popup(void* player, const char* message) {
+    return live_send_text(player, message ? message : "", LiveTextType::Popup) ? 0 : 1;
+}
+
+int api_player_send_system_message(void* player, const char* message) {
+    return live_send_text(player, message ? message : "", LiveTextType::SystemMessage) ? 0 : 1;
+}
+
+int api_player_send_toast(void* player, const char* title, const char* content) {
+    return live_send_toast(player, title ? title : "", content ? content : "") ? 0 : 1;
+}
+
+int api_player_reset_title(void* player) {
+    return live_reset_title(player) ? 0 : 1;
+}
+
+int api_player_transfer(void* player, const char* host, int port) {
+    return live_transfer(player, host ? host : "127.0.0.1", port) ? 0 : 1;
+}
+
 const yoyo_api kApi = {
     YOYO_PLUGIN_ABI_VERSION,
     &api_get_server_version,
@@ -129,6 +174,17 @@ const yoyo_api kApi = {
     &api_player_send_form,
     &api_player_get_game_mode,
     &api_player_set_game_mode,
+    &api_player_get_health,
+    &api_player_is_sneaking,
+    &api_player_is_sprinting,
+    &api_player_is_flying,
+    &api_player_get_held_slot,
+    &api_player_send_tip,
+    &api_player_send_popup,
+    &api_player_send_system_message,
+    &api_player_send_toast,
+    &api_player_reset_title,
+    &api_player_transfer,
 };
 
 std::string to_utf8(const std::filesystem::path& path) {

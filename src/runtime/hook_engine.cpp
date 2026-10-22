@@ -73,6 +73,16 @@ void write_absolute_jump(uint8_t* at, const void* destination) {
     std::memcpy(at + 6, &value, sizeof(value));
 }
 
+void write_absolute_jump_short(uint8_t* at, const void* destination) {
+    /* 48 B8 <imm64> FF E0     mov rax, imm64; jmp rax (12 bytes) */
+    at[0] = 0x48;
+    at[1] = 0xB8;
+    uintptr_t value = reinterpret_cast<uintptr_t>(destination);
+    std::memcpy(at + 2, &value, sizeof(value));
+    at[10] = 0xFF;
+    at[11] = 0xE0;
+}
+
 } // namespace
 
 bool install_call_hook(void* call_site, void* detour, void** original) {
@@ -252,6 +262,84 @@ bool install_inline_hook_reloc(InlineHook& hook,
     std::memcpy(hook.original, code, expected_length);
     write_absolute_jump(code, detour);
     for (size_t i = kJumpSize; i < expected_length; ++i) {
+        code[i] = 0x90;
+    }
+    flush_code(code, expected_length);
+    restore_protection(code, expected_length, old_state);
+
+    hook.target = target;
+    hook.trampoline = trampoline;
+    hook.patch_length = expected_length;
+    hook.installed = true;
+    return true;
+}
+
+bool install_inline_hook_short(InlineHook& hook,
+                               void* target,
+                               const uint8_t* expected,
+                               size_t expected_length,
+                               void* detour,
+                               size_t jcc_offset,
+                               size_t jcc_length,
+                               void* jcc_target) {
+    constexpr size_t kShortJumpSize = 12;
+    if (target == nullptr || expected == nullptr || detour == nullptr || expected_length < kShortJumpSize) {
+        return false;
+    }
+    if (jcc_offset != 0 && (jcc_length != 2 || jcc_offset + jcc_length > expected_length ||
+                            jcc_target == nullptr)) {
+        return false;
+    }
+    auto* code = static_cast<uint8_t*>(target);
+    if (std::memcmp(code, expected, expected_length) != 0) {
+        return false;
+    }
+
+    void* trampoline = alloc_executable_near(code, expected_length + 32);
+    if (trampoline == nullptr) {
+        return false;
+    }
+    auto* tramp = static_cast<uint8_t*>(trampoline);
+    size_t out = 0;
+    if (jcc_offset == 0) {
+        std::memcpy(tramp, code, expected_length);
+        out = expected_length;
+    } else {
+        std::memcpy(tramp, code, jcc_offset);
+        out = jcc_offset;
+        const uint8_t opcode = code[jcc_offset];
+        if (opcode < 0x70 || opcode > 0x7F) {
+            free_executable(trampoline, expected_length + 32);
+            return false;
+        }
+        /* 0F 8x rel32: same condition code, now reaching the original
+         * branch destination from the trampoline. */
+        tramp[out++] = 0x0F;
+        tramp[out++] = static_cast<uint8_t>(0x80 | (opcode & 0x0F));
+        const auto delta = static_cast<int64_t>(reinterpret_cast<intptr_t>(jcc_target) -
+                                                reinterpret_cast<intptr_t>(tramp + out + 4));
+        if (delta < INT32_MIN || delta > INT32_MAX) {
+            free_executable(trampoline, expected_length + 32);
+            return false;
+        }
+        const auto relative = static_cast<int32_t>(delta);
+        std::memcpy(tramp + out, &relative, sizeof(relative));
+        out += 4;
+        const size_t suffix = jcc_offset + jcc_length;
+        std::memcpy(tramp + out, code + suffix, expected_length - suffix);
+        out += expected_length - suffix;
+    }
+    write_absolute_jump(tramp + out, reinterpret_cast<void*>(
+                                        reinterpret_cast<uintptr_t>(target) + expected_length));
+
+    uintptr_t old_state = 0;
+    if (!make_writable(code, expected_length, old_state)) {
+        free_executable(trampoline, expected_length + 32);
+        return false;
+    }
+    std::memcpy(hook.original, code, expected_length);
+    write_absolute_jump_short(code, detour);
+    for (size_t i = kShortJumpSize; i < expected_length; ++i) {
         code[i] = 0x90;
     }
     flush_code(code, expected_length);

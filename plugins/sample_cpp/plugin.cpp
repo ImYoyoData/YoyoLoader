@@ -54,6 +54,16 @@ void on_event(void*, int type, const void* event) {
                       e->reason ? e->reason : "");
         break;
     }
+    case YOYO_EVENT_PLAYER_HEALTH: {
+        const auto* e = static_cast<const yoyo_detail_event*>(event);
+        std::snprintf(line, sizeof(line), "health name=%s value=%d", player_name(e->player), e->value);
+        break;
+    }
+    case YOYO_EVENT_PLAYER_JUMP: {
+        const auto* e = static_cast<const yoyo_detail_event*>(event);
+        std::snprintf(line, sizeof(line), "jump name=%s", player_name(e->player));
+        break;
+    }
     default: return;
     }
     g_api->log(0, line);
@@ -71,6 +81,8 @@ YOYO_EXPORT const yoyo_api* YOYO_CALL yoyo_plugin_entry(const yoyo_api* api) {
     api->register_event(YOYO_EVENT_JOIN, &on_event, nullptr);
     api->register_event(YOYO_EVENT_CHAT, &on_event, nullptr);
     api->register_event(YOYO_EVENT_LEFT, &on_event, nullptr);
+    api->register_event(YOYO_EVENT_PLAYER_HEALTH, &on_event, nullptr);
+    api->register_event(YOYO_EVENT_PLAYER_JUMP, &on_event, nullptr);
     api->log(0, "sample_cpp plugin loaded");
     return api;
 }

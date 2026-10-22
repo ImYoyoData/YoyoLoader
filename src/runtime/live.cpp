@@ -3,6 +3,7 @@
 #include "hooks.h"
 #include "log.h"
 #include "native_string.h"
+#include "packet_events.h"
 #include "players.h"
 #include "runtime.h"
 
@@ -244,6 +245,9 @@ bool send_network_packet(void* player, void* packet) {
     }
     const size_t slot = live->send_network_packet_slot / sizeof(void*);
     void* target = vtable[slot];
+    if (target == packet_send_hook_address()) {
+        target = packet_send_original_address();
+    }
     const uintptr_t base = state().module.base;
     auto address = reinterpret_cast<uintptr_t>(target);
     if (target == nullptr || address < base || address >= base + 0x10000000) {
@@ -607,6 +611,20 @@ void* live_take_player_for_network(const void* network_id) {
             std::memcmp(it->second.bytes.data(), network_id, 176) == 0) {
             void* player = it->first;
             ids.erase(it);
+            return player;
+        }
+    }
+    return nullptr;
+}
+
+void* live_find_player_for_network(const void* network_id) {
+    if (network_id == nullptr) {
+        return nullptr;
+    }
+    std::lock_guard lock(network_mutex());
+    for (const auto& [player, entry] : network_ids()) {
+        if (entry.bytes.size() == 176 &&
+            std::memcmp(entry.bytes.data(), network_id, 176) == 0) {
             return player;
         }
     }

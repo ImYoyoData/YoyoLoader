@@ -311,14 +311,29 @@ Windows 验证时，在 `version.cpp` 中填入两个 handler 的 RVA 和序言�
   Windows 前 30 字节没有 RIP-relative，可直接复制。
 - `onPlayerMove` 和 `onPlayerChangeDimension` 不需要额外 packet hook，
   在 `Level::tick` 的 detour 中按玩家轮询位置/维度即可。
+- `MinecraftPackets::createPacket` 是统一收包入口：hook 后把 `Packet::handler_`
+  （Packet 基类 `+0x20`）换成 dispatcher，收到 packet 对象、packet id 和
+  `NetworkIdentifier`，再调用原 dispatcher。包 ID 来自 createPacket 参数，
+  不依赖 packet vtable。
+- Linux `createPacket` 的最短安全序言是 12 字节，包含 `77 12` 短跳转；
+  `install_inline_hook_short` 用 12 字节 `mov rax,imm64; jmp rax` 覆盖，并在
+  trampoline 中把短跳转扩展成近跳转。Windows 用普通 14 字节序言即可。
+- 出站 `Player::sendNetworkPacket` 是共享 vtable 槽位：首次登录时 patch 一次，
+  detour 收到 `(ServerPlayer*, Packet*)`，用 createPacket 记录的 packet vtable→id
+  表识别 `SetHealth(42)`、`DeathInfo(189)`，提供生命值/死亡/`onPacketSend`。
+  高流量包（chunk、subchunk、LevelSound 等）跳过发送事件。
+- `PlayerEquipment(31)` payload 尾部是 `slot, selected_slot, container_id`；
+  当前用相邻 0..8 整数对做启发式解析，没有硬编码描述符大小。
 
 ## 9. 已知未完成项
 
 - `onChat` 的真实客户端链路仍需确认；测试 bot 的 TextPacket 在 BDS 聊天处理前被丢弃。
-- 表单响应回调、跨维度传送、生命值/背包/权限/飞行、Scoreboard、命令执行、
-  实时 Block/Item/Container/Entity 尚未接入。
+- 跨维度传送、背包/权限/经验、Scoreboard、命令执行、实时 Block/Item/Container/Entity
+  尚未接入。
+- 本轮新增 packet 事件尚未启动服务器做真实客户端回归（按要求未启动）。
 - `pre_join` 的 IP 字段为空；`PlayerAuthenticationInfo` 不含客户端地址。
 - `getUniqueId` 返回原始 `ActorUniqueID`，当前版本可能表现为负数。
+- Linux 多世界 fork/exec 逻辑尚未在本机运行（本机无 Linux 工具链）。
 
 ## 10. 多核与多世界
 

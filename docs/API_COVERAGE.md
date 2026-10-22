@@ -22,7 +22,15 @@
 | `onTick` | ✅ | `Level::tick` 内联 hook，Windows/Linux 实测 |
 | `onPlayerMove` | ✅ | tick 内轮询位置，阈值 0.01 格；传送/移动实测 |
 | `onPlayerChangeDimension` | 🟡 | tick 内比较维度；逻辑已接入，等待跨维度场景实测 |
-| 其他 LLSE 事件 | ❌ | `mc.listen` 会警告，不触发 |
+| `onPlayerJump` / `onSneak` / `onChangeSprinting` | 🟡 | `PlayerAuthInputPacket` / `PlayerActionPacket`；已实现，等待真实客户端验证 |
+| `onPlayerAction` / 方块和物品 action 明细 | 🟡 | `PlayerActionPacket`；取消只丢 action，不做事务回滚 |
+| `onPlayerCmd` | 🟡 | `CommandRequestPacket`；命令原文可取消 |
+| `onFormResponse` | 🟡 | `ModalFormResponsePacket`；form id + 响应文本 |
+| `onPlayerSkinChange` / `onPlayerEmote` / `onPlayerItemHeld` | 🟡 | 对应 packet；槽位解析为启发式 |
+| `onPlayerRespawn` / `onPlayerTeleport` / `onPlayerGameModeChange` | 🟡 | respawn/传送/游戏模式 |
+| `onPlayerHealthChange` / `onPlayerDie` | 🟡 | 出站 `SetHealth` / `DeathInfo` + `sendNetworkPacket` vtable hook |
+| `onPacketReceive` / `onPacketSend` | 🟡 | 统一 packet 包装；高流量包跳过发送事件 |
+| 其他 LLSE/Endstone 事件 | ❌ | 区块、红石、活塞、投射物、天气、计分板等仍需新引擎 hook |
 
 ## 玩家
 
@@ -51,7 +59,10 @@
 | `setGameMode` | ✅ | `Player::setPlayerGameType` vtable |
 | `getRuntimeId` | ✅ | RuntimeIDComponent |
 | `getUniqueId` | ✅ | ActorUniqueID 原始值，可能为负 |
-| `getNbt` / 背包 / 生命值 / 权限 / 飞行 / 皮肤 / Ping | ❌ | 尚未接入 |
+| `getHealth` | 🟡 | 出站 SetHealth 缓存；未收到包时返回 null |
+| `isSneaking` / `isSprinting` / `isFlying` | 🟡 | PlayerAuthInput / PlayerAction 状态缓存 |
+| `getHeldItemSlot` | 🟡 | PlayerEquipment 槽位启发式解析 |
+| `getNbt` / 背包 / 权限 / 皮肤对象 / Ping / `setHealth` | ❌ | 尚未接入 |
 | 跨维度传送 | ❌ | 需要 `Level::entityChangeDimension` / changeDimension request |
 
 ## NBT
@@ -71,7 +82,7 @@
 | `setTitle` / `setContent` / `setConfirm` / `setCancel` | ✅ |
 | `toJSON` / `toString` | ✅ |
 | `form.sendTo(player)` / `player.sendForm` | ✅ 真实 ModalFormRequest 包下发 |
-| 表单响应回调（客户端提交 → JS callback） | ❌ 尚未 hook ModalFormResponse |
+| 表单响应回调（客户端提交 → JS callback） | 🟡 全局 `onFormResponse`；Form 对象级回调未接入 |
 
 ## 物品 / 方块 / 容器 / 实体
 
@@ -91,7 +102,7 @@
 | `mc.getModuleBase` | ✅ |
 | `mc.broadcast` | ✅ 真实 TextPacket，发送给在线玩家 |
 | `mc.getLevel` | 🟡 轻量对象，仅玩家列表/数量 |
-| `mc.worlds.list/current/isController/load/unload/switch/isOp` | ✅ Windows 原型；多进程世界 |
+| `mc.worlds.list/current/isController/load/unload/switch/isOp` | ✅ Windows / Linux 多进程世界；Linux 使用 fork+exec+yoyo |
 | `player.transfer(host, port)` | ✅ 真实 TransferPacket |
 | `mc.runcmd` / `mc.runcmdEx` | ❌ 需要 CommandOrigin / MinecraftCommands |
 | Scoreboard / BossBar / Map / Boss Event | ❌ |
@@ -101,7 +112,7 @@
 
 | 类型 | 状态 |
 |---|---|
-| C++ 插件（C ABI v2） | ✅ 事件 + live 玩家 API；`sample_cpp` 实测 |
+| C++ 插件（C ABI v3） | ✅ 事件 + live 玩家 API + 状态查询；`sample_cpp` 编译 |
 | Go 插件（cgo c-shared） | ✅ 事件 + live 玩家 API 声明；Windows 构建需 MinGW-w64 |
 | JavaScript 插件 | ✅ QuickJS-ng 0.17.0；事件、NBT、表单、live 玩家 API |
 
@@ -127,4 +138,8 @@
 - `onChat` 的完整链路：测试 bot 的 TextPacket 在 BDS 聊天处理前被丢弃；
   handler 与原生字符串重写在 `mc.__simulateChat` / `mc.__rewriteNative` 中已自测。
 - 跨维度 teleport。
-- 表单响应回调。
+- 本批新增的 packet 事件（Jump/Sneak/Sprint、Block/Item action、Command、
+  FormResponse、Skin/Emote/ItemHeld、Health/Die、PacketSend/Receive）。
+  这些代码已通过 Windows 编译和 hook 分支自测，但按照本轮要求没有启动服务器，
+  需要在真实客户端上做一轮回归。
+- Linux 多世界新代码已写入，但本机没有 Linux 工具链，未做编译/运行验证。

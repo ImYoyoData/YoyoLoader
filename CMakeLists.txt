@@ -27,6 +27,7 @@ set(YOYO_RUNTIME_SOURCES
     src/runtime/hook_engine.cpp
     src/runtime/hooks.cpp
     src/runtime/live.cpp
+    src/runtime/packet_events.cpp
     src/runtime/worlds.cpp
     src/runtime/events.cpp
     src/runtime/plugin_loader.cpp

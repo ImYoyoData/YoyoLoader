@@ -5,6 +5,7 @@
 #include "../live.h"
 #include "../log.h"
 #include "../native_string.h"
+#include "../packet_events.h"
 #include "../players.h"
 #include "../runtime.h"
 #include "../worlds.h"
@@ -78,13 +79,68 @@ std::string normalize_event(std::string name) {
         name == "player_dimension") {
         return "onPlayerChangeDimension";
     }
+    if (name == "onJump" || name == "jump" || name == "player_jump") return "onPlayerJump";
+    if (name == "onSneak" || name == "sneak" || name == "player_sneak") return "onSneak";
+    if (name == "onChangeSprinting" || name == "sprint" || name == "player_sprint") {
+        return "onChangeSprinting";
+    }
+    if (name == "onPlayerAction" || name == "player_action") return "onPlayerAction";
+    if (name == "onStartDestroyBlock" || name == "start_destroy_block") return "onStartDestroyBlock";
+    if (name == "onDestroyBlock" || name == "destroy_block") return "onDestroyBlock";
+    if (name == "onBlockInteracted" || name == "block_interacted") return "onBlockInteracted";
+    if (name == "onUseItem" || name == "use_item") return "onUseItem";
+    if (name == "onUseItemOn" || name == "use_item_on") return "onUseItemOn";
+    if (name == "onDropItem" || name == "drop_item" || name == "onPlayerDropItem") return "onDropItem";
+    if (name == "onBedEnter" || name == "bed_enter") return "onBedEnter";
+    if (name == "onBedLeave" || name == "bed_leave") return "onBedLeave";
+    if (name == "onPlayerCmd" || name == "onCommand" || name == "player_command") return "onPlayerCmd";
+    if (name == "onFormResponse" || name == "form_response") return "onFormResponse";
+    if (name == "onPlayerSkinChange" || name == "onSkinChanged" || name == "skin_change") {
+        return "onPlayerSkinChange";
+    }
+    if (name == "onPlayerEmote" || name == "onEmote" || name == "emote") return "onPlayerEmote";
+    if (name == "onPlayerRespawn" || name == "onRespawn" || name == "player_respawn") {
+        return "onPlayerRespawn";
+    }
+    if (name == "onPlayerTeleport" || name == "onTeleport" || name == "player_teleport") {
+        return "onPlayerTeleport";
+    }
+    if (name == "onPlayerGameModeChange" || name == "onGameModeChange" || name == "game_mode_change") {
+        return "onPlayerGameModeChange";
+    }
+    if (name == "onPlayerItemHeld" || name == "onItemHeld" || name == "item_held") {
+        return "onPlayerItemHeld";
+    }
+    if (name == "onPacketReceive" || name == "onPacket" || name == "packet_receive") {
+        return "onPacketReceive";
+    }
+    if (name == "onPlayerInteract" || name == "onPlayerInteractEntity" || name == "player_interact") {
+        return "onPlayerInteract";
+    }
+    if (name == "onPlayerAttackEntity" || name == "onAttackEntity" || name == "attack_entity") {
+        return "onPlayerAttackEntity";
+    }
+    if (name == "onPlayerHealthChange" || name == "onHealthChange" || name == "health_change") {
+        return "onPlayerHealthChange";
+    }
+    if (name == "onPlayerDie" || name == "onDie" || name == "player_die") return "onPlayerDie";
+    if (name == "onPacketSend" || name == "packet_send") return "onPacketSend";
     return name;
 }
 
 bool implemented_event(const std::string& name) {
     return name == "onPreJoin" || name == "onJoin" || name == "onChat" || name == "onLeft" ||
            name == "onServerReady" || name == "onTick" || name == "onPlayerMove" ||
-           name == "onPlayerChangeDimension";
+           name == "onPlayerChangeDimension" || name == "onPlayerJump" || name == "onSneak" ||
+           name == "onChangeSprinting" || name == "onPlayerAction" ||
+           name == "onStartDestroyBlock" || name == "onDestroyBlock" ||
+           name == "onBlockInteracted" || name == "onUseItem" || name == "onUseItemOn" ||
+           name == "onDropItem" || name == "onBedEnter" || name == "onBedLeave" ||
+           name == "onPlayerCmd" || name == "onFormResponse" || name == "onPlayerSkinChange" ||
+           name == "onPlayerEmote" || name == "onPlayerRespawn" || name == "onPlayerTeleport" ||
+           name == "onPlayerGameModeChange" || name == "onPlayerItemHeld" ||
+           name == "onPacketReceive" || name == "onPlayerInteract" ||
+           name == "onPlayerHealthChange" || name == "onPlayerDie" || name == "onPacketSend";
 }
 
 bool call_listeners_locked(const std::string& event, int argc, JSValueConst* argv) {
@@ -281,6 +337,37 @@ JSValue player_get_unique_id(JSContext* ctx, JSValueConst this_val, int, JSValue
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewInt64(ctx, static_cast<int64_t>(live_unique_id(handle)));
+}
+
+JSValue player_is_sneaking(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    void* handle = player_handle(ctx, this_val);
+    return JS_NewBool(ctx, handle != nullptr && packet_player_is_sneaking(handle));
+}
+
+JSValue player_is_sprinting(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    void* handle = player_handle(ctx, this_val);
+    return JS_NewBool(ctx, handle != nullptr && packet_player_is_sprinting(handle));
+}
+
+JSValue player_is_flying(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    void* handle = player_handle(ctx, this_val);
+    return JS_NewBool(ctx, handle != nullptr && packet_player_is_flying(handle));
+}
+
+JSValue player_get_held_slot(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    const int slot = packet_player_held_slot(handle);
+    if (slot < 0) return JS_NULL;
+    return JS_NewInt32(ctx, slot);
+}
+
+JSValue player_get_health(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    const int health = packet_player_health(handle);
+    if (health < 0) return JS_NULL;
+    return JS_NewInt32(ctx, health);
 }
 
 JSValue player_teleport(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -747,9 +834,29 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
     JS_SetPropertyStr(ctx, object, "set_game_mode",
                       JS_NewCFunction(ctx, player_set_game_mode, "set_game_mode", 1));
     JS_SetPropertyStr(ctx, object, "teleport", JS_NewCFunction(ctx, player_teleport, "teleport", 4));
+    JS_SetPropertyStr(ctx, object, "isSneaking", JS_NewCFunction(ctx, player_is_sneaking, "isSneaking", 0));
+    JS_SetPropertyStr(ctx, object, "is_sneaking", JS_NewCFunction(ctx, player_is_sneaking, "is_sneaking", 0));
+    JS_SetPropertyStr(ctx, object, "isSprinting", JS_NewCFunction(ctx, player_is_sprinting, "isSprinting", 0));
+    JS_SetPropertyStr(ctx, object, "is_sprinting", JS_NewCFunction(ctx, player_is_sprinting, "is_sprinting", 0));
+    JS_SetPropertyStr(ctx, object, "isFlying", JS_NewCFunction(ctx, player_is_flying, "isFlying", 0));
+    JS_SetPropertyStr(ctx, object, "is_flying", JS_NewCFunction(ctx, player_is_flying, "is_flying", 0));
+    JS_SetPropertyStr(ctx, object, "getHeldItemSlot",
+                      JS_NewCFunction(ctx, player_get_held_slot, "getHeldItemSlot", 0));
+    JS_SetPropertyStr(ctx, object, "get_held_item_slot",
+                      JS_NewCFunction(ctx, player_get_held_slot, "get_held_item_slot", 0));
+    JS_SetPropertyStr(ctx, object, "getHealth", JS_NewCFunction(ctx, player_get_health, "getHealth", 0));
+    JS_SetPropertyStr(ctx, object, "get_health", JS_NewCFunction(ctx, player_get_health, "get_health", 0));
     JS_SetPropertyStr(ctx, object, "getNbt", JS_NewCFunction(ctx, player_unsupported, "getNbt", 0));
     JS_SetPropertyStr(ctx, object, "toString", JS_NewCFunction(ctx, player_to_string, "toString", 0));
     return object;
+}
+
+bool has_listener(std::string_view event) {
+    std::lock_guard lock(g_mutex);
+    if (g_context == nullptr) return false;
+    const std::string name = normalize_event(std::string(event));
+    auto it = g_listeners.find(name);
+    return it != g_listeners.end() && !it->second.empty();
 }
 
 bool start() {
@@ -922,6 +1029,146 @@ void dispatch_player_dimension_change(const PlayerView& player, int from_dimensi
     JS_FreeValue(g_context, args[0]);
     JS_FreeValue(g_context, args[1]);
     JS_FreeValue(g_context, args[2]);
+}
+
+namespace {
+
+const char* detail_event_name(int type) {
+    switch (type) {
+    case YOYO_EVENT_PLAYER_JUMP: return "onPlayerJump";
+    case YOYO_EVENT_PLAYER_SNEAK: return "onSneak";
+    case YOYO_EVENT_PLAYER_SPRINT: return "onChangeSprinting";
+    case YOYO_EVENT_PLAYER_ACTION: return "onPlayerAction";
+    case YOYO_EVENT_BLOCK_START_DESTROY: return "onStartDestroyBlock";
+    case YOYO_EVENT_BLOCK_DESTROY: return "onDestroyBlock";
+    case YOYO_EVENT_BLOCK_INTERACT: return "onBlockInteracted";
+    case YOYO_EVENT_ITEM_USE: return "onUseItem";
+    case YOYO_EVENT_ITEM_USE_ON: return "onUseItemOn";
+    case YOYO_EVENT_ITEM_DROP: return "onDropItem";
+    case YOYO_EVENT_BED_ENTER: return "onBedEnter";
+    case YOYO_EVENT_BED_LEAVE: return "onBedLeave";
+    case YOYO_EVENT_PLAYER_COMMAND: return "onPlayerCmd";
+    case YOYO_EVENT_FORM_RESPONSE: return "onFormResponse";
+    case YOYO_EVENT_PLAYER_SKIN: return "onPlayerSkinChange";
+    case YOYO_EVENT_PLAYER_EMOTE: return "onPlayerEmote";
+    case YOYO_EVENT_PLAYER_RESPAWN: return "onPlayerRespawn";
+    case YOYO_EVENT_PLAYER_TELEPORT: return "onPlayerTeleport";
+    case YOYO_EVENT_PLAYER_GAME_MODE: return "onPlayerGameModeChange";
+    case YOYO_EVENT_PLAYER_ITEM_HELD: return "onPlayerItemHeld";
+    case YOYO_EVENT_PACKET_RECEIVE: return "onPacketReceive";
+    case YOYO_EVENT_PLAYER_INTERACT: return "onPlayerInteract";
+    case YOYO_EVENT_PLAYER_ATTACK: return "onPlayerAttackEntity";
+    case YOYO_EVENT_PLAYER_HEALTH: return "onPlayerHealthChange";
+    case YOYO_EVENT_PLAYER_DIE: return "onPlayerDie";
+    case YOYO_EVENT_PACKET_SEND: return "onPacketSend";
+    default: return nullptr;
+    }
+}
+
+JSValue make_position(JSContext* ctx, int x, int y, int z, int dimension) {
+    JSValue object = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, object, "x", JS_NewInt32(ctx, x));
+    JS_SetPropertyStr(ctx, object, "y", JS_NewInt32(ctx, y));
+    JS_SetPropertyStr(ctx, object, "z", JS_NewInt32(ctx, z));
+    JS_SetPropertyStr(ctx, object, "dimension", JS_NewInt32(ctx, dimension));
+    JS_SetPropertyStr(ctx, object, "dimensionName", JS_NewString(ctx, live_dimension_name(dimension)));
+    return object;
+}
+
+} // namespace
+
+void dispatch_detail(int type, const PlayerView& player, const DetailEvent& detail, bool& cancelled) {
+    std::lock_guard lock(g_mutex);
+    if (g_context == nullptr) return;
+    const char* name = detail_event_name(type);
+    if (name == nullptr) return;
+    auto it = g_listeners.find(name);
+    if (it == g_listeners.end() || it->second.empty()) return;
+    JS_UpdateStackTop(g_runtime);
+
+    const int dimension = player.handle != nullptr ? live_get_dimension(player.handle) : -9999;
+    JSValue js_player = make_player(g_context, player);
+    JSValue event = JS_NewObject(g_context);
+    JS_SetPropertyStr(g_context, event, "cancelled", JS_FALSE);
+    JS_SetPropertyStr(g_context, event, "packetId", JS_NewInt32(g_context, detail.packet_id));
+    JS_SetPropertyStr(g_context, event, "action", JS_NewInt32(g_context, detail.action));
+
+    JSValue args[6] = {};
+    int argc = 0;
+    args[argc++] = js_player;
+    switch (type) {
+    case YOYO_EVENT_PLAYER_JUMP:
+    case YOYO_EVENT_ITEM_USE:
+    case YOYO_EVENT_ITEM_DROP:
+    case YOYO_EVENT_PLAYER_RESPAWN:
+    case YOYO_EVENT_PLAYER_DIE:
+        break;
+    case YOYO_EVENT_PLAYER_SNEAK:
+    case YOYO_EVENT_PLAYER_SPRINT:
+        args[argc++] = JS_NewBool(g_context, detail.value != 0);
+        break;
+    case YOYO_EVENT_PLAYER_ACTION:
+        args[argc++] = JS_NewInt32(g_context, detail.action);
+        args[argc++] = make_position(g_context, detail.x, detail.y, detail.z, dimension);
+        break;
+    case YOYO_EVENT_BLOCK_START_DESTROY:
+    case YOYO_EVENT_BLOCK_DESTROY:
+    case YOYO_EVENT_BLOCK_INTERACT:
+    case YOYO_EVENT_ITEM_USE_ON:
+    case YOYO_EVENT_BED_ENTER:
+    case YOYO_EVENT_BED_LEAVE:
+    case YOYO_EVENT_PLAYER_INTERACT:
+    case YOYO_EVENT_PLAYER_ATTACK:
+        args[argc++] = make_position(g_context, detail.x, detail.y, detail.z, dimension);
+        break;
+    case YOYO_EVENT_PLAYER_COMMAND:
+        args[argc++] = JS_NewStringLen(g_context, detail.text.data(), detail.text.size());
+        break;
+    case YOYO_EVENT_FORM_RESPONSE:
+        args[argc++] = JS_NewInt32(g_context, detail.value);
+        args[argc++] = JS_NewStringLen(g_context, detail.text.data(), detail.text.size());
+        break;
+    case YOYO_EVENT_PLAYER_SKIN:
+        args[argc++] = JS_NewStringLen(g_context, detail.text.data(), detail.text.size());
+        break;
+    case YOYO_EVENT_PLAYER_EMOTE:
+        args[argc++] = JS_NewStringLen(g_context, detail.text.data(), detail.text.size());
+        args[argc++] = JS_NewStringLen(g_context, detail.text2.data(), detail.text2.size());
+        break;
+    case YOYO_EVENT_PLAYER_TELEPORT: {
+        LiveVec3 position;
+        if (player.handle == nullptr || !live_get_position(player.handle, position)) {
+            position = {static_cast<double>(detail.x), static_cast<double>(detail.y),
+                        static_cast<double>(detail.z)};
+        }
+        args[argc++] = make_location(g_context, position, dimension, false, 0.0f, 0.0f);
+        break;
+    }
+    case YOYO_EVENT_PLAYER_GAME_MODE:
+    case YOYO_EVENT_PLAYER_HEALTH:
+        args[argc++] = JS_NewInt32(g_context, detail.value);
+        break;
+    case YOYO_EVENT_PLAYER_ITEM_HELD:
+        args[argc++] = JS_NewInt32(g_context, detail.slot);
+        args[argc++] = JS_NewInt32(g_context, detail.value);
+        break;
+    case YOYO_EVENT_PACKET_RECEIVE:
+    case YOYO_EVENT_PACKET_SEND:
+        args[argc++] = JS_NewInt32(g_context, detail.packet_id);
+        break;
+    default:
+        break;
+    }
+    args[argc++] = event;
+
+    bool result = call_listeners_locked(name, argc, args);
+    JSValue flag = JS_GetPropertyStr(g_context, event, "cancelled");
+    if (JS_ToBool(g_context, flag) == 1) result = true;
+    JS_FreeValue(g_context, flag);
+    for (int i = 0; i < argc; ++i) {
+        JS_FreeValue(g_context, args[i]);
+    }
+    if (result) cancelled = true;
 }
 
 } // namespace yoyo::js

@@ -34,10 +34,35 @@ mc.listen("onPlayerMove", (player, from, to) => {
     // from/to: { x, y, z, dimension, dimensionName }
 });
 mc.listen("onPlayerChangeDimension", (player, fromDimension, toDimension) => {});
+mc.listen("onPlayerJump", (player, event) => {});
+mc.listen("onSneak", (player, sneaking, event) => {});
+mc.listen("onChangeSprinting", (player, sprinting, event) => {});
+mc.listen("onStartDestroyBlock", (player, pos, event) => {});
+mc.listen("onDestroyBlock", (player, pos, event) => {});
+mc.listen("onBlockInteracted", (player, pos, event) => {});
+mc.listen("onUseItem", (player, event) => {});
+mc.listen("onUseItemOn", (player, pos, event) => {});
+mc.listen("onDropItem", (player, event) => {});
+mc.listen("onBedEnter", (player, pos, event) => {});
+mc.listen("onBedLeave", (player, pos, event) => {});
+mc.listen("onPlayerCmd", (player, command, event) => {});
+mc.listen("onFormResponse", (player, formId, response, event) => {});
+mc.listen("onPlayerSkinChange", (player, uuid, event) => {});
+mc.listen("onPlayerEmote", (player, pieceId, xuid, event) => {});
+mc.listen("onPlayerRespawn", (player, event) => {});
+mc.listen("onPlayerTeleport", (player, location, event) => {});
+mc.listen("onPlayerGameModeChange", (player, mode, event) => {});
+mc.listen("onPlayerItemHeld", (player, slot, previousSlot, event) => {});
+mc.listen("onPlayerHealthChange", (player, health, event) => {});
+mc.listen("onPlayerDie", (player, event) => {});
+mc.listen("onPacketReceive", (player, packetId, event) => {});
+mc.listen("onPacketSend", (player, packetId, event) => {});
 ```
 
 Aliases: `pre_join`, `join`, `chat`, `left`, `server_ready`, `tick`,
-`player_move`, `player_change_dimension`.
+`player_move`, `player_change_dimension`, `onJump`/`jump`, `onSneak`/`sneak`,
+`onChangeSprinting`/`sprint`, `onCommand`, `onFormResponse`, `onHealthChange`,
+`onDie`, `packet_receive`, `packet_send`.
 
 `onLeft` is driven by `ServerNetworkHandler::_onPlayerLeft` and fires for normal
 quits, kicks and timeouts. `onChat` rewrites the native TextPacket string in
@@ -47,6 +72,14 @@ place; if the new text does not fit, the original is kept.
 intended for short, cheap work. `onPlayerMove` is polled from the same tick
 loop with a 0.01-block threshold; it fires at most once per tick per player.
 `onPlayerChangeDimension` is emitted when the polled dimension changes.
+
+Block/item actions are driven by `PlayerActionPacket`. Setting
+`event.cancelled` drops that action, but YoyoLoader does not implement full
+client-prediction or inventory-transaction rollback; test block/item
+cancellation on a real client before using it on a production server.
+`onPlayerHealthChange` and `onPlayerDie` need the outgoing `SetHealth` /
+`DeathInfo` packets, so `getHealth()` returns `null` until the first one is
+observed. `onPacketSend` skips high-volume chunk/level-sound packets.
 
 Other LLSE event names are accepted by `mc.listen` but only log a warning; they
 do not fire in this build.
@@ -80,6 +113,11 @@ player.getUniqueId();               // raw ActorUniqueID (may be negative)
 player.getGameMode();               // 0 survival, 1 creative, 2 adventure, 6 spectator
 player.getGameModeName();
 player.setGameMode("creative");     // or a number
+player.isSneaking();
+player.isSprinting();
+player.isFlying();
+player.getHeldItemSlot();           // null until PlayerEquipment is observed
+player.getHealth();                 // null until SetHealth is observed
 
 // moderation
 player.kick("reason");

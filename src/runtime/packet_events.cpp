@@ -1,0 +1,851 @@
+#include "packet_events.h"
+
+#include "events.h"
+#include "hook_engine.h"
+#include "js/js_engine.h"
+#include "live.h"
+#include "log.h"
+#include "native_string.h"
+#include "players.h"
+#include "runtime.h"
+
+#include <cstdint>
+#include <cstring>
+#include <iterator>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+namespace yoyo {
+namespace {
+
+constexpr size_t kPacketBaseSize = 48;
+constexpr size_t kPacketHandlerOffset = 32;
+constexpr int kPacketPlayerEquipment = 31;
+constexpr int kPacketInteract = 33;
+constexpr int kPacketPlayerAction = 36;
+constexpr int kPacketSetHealth = 42;
+constexpr int kPacketRespawn = 45;
+constexpr int kPacketDeathInfo = 189;
+constexpr int kPacketContainerOpen = 46;
+constexpr int kPacketContainerClose = 47;
+constexpr int kPacketCommandRequest = 77;
+constexpr int kPacketPlayerSkin = 93;
+constexpr int kPacketModalFormResponse = 101;
+constexpr int kPacketEmote = 138;
+constexpr int kPacketPlayerAuthInput = 144;
+
+enum PlayerActionType : int {
+    ActionStartDestroyBlock = 0,
+    ActionAbortDestroyBlock = 1,
+    ActionStopDestroyBlock = 2,
+    ActionDropItem = 4,
+    ActionStartSleeping = 5,
+    ActionStopSleeping = 6,
+    ActionRespawn = 7,
+    ActionStartJump = 8,
+    ActionStartSprinting = 9,
+    ActionStopSprinting = 10,
+    ActionStartSneaking = 11,
+    ActionStopSneaking = 12,
+    ActionCreativeDestroyBlock = 13,
+    ActionHandledTeleport = 30,
+    ActionStartFlying = 34,
+    ActionStopFlying = 35,
+    ActionStartUsingItem = 37,
+    ActionInteractWithBlock = 25,
+    ActionStartItemUseOn = 28,
+    ActionStopItemUseOn = 29,
+    ActionStartSwimming = 21,
+    ActionStopSwimming = 22,
+    ActionStartGliding = 15,
+    ActionStopGliding = 16,
+};
+
+struct PlayerState {
+    bool initialized = false;
+    bool sneaking = false;
+    bool sprinting = false;
+    bool flying = false;
+    bool jumping = false;
+    bool dead = false;
+    int held_slot = -1;
+    int health = -1;
+};
+
+std::mutex& state_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<void*, PlayerState>& player_states() {
+    static std::unordered_map<void*, PlayerState> states;
+    return states;
+}
+
+class PacketDispatcher {
+public:
+    virtual ~PacketDispatcher() = default;
+    virtual void handle(const void* network_id, void* callback, void* packet_ref) const = 0;
+};
+
+/*
+ * BDS calls IPacketHandlerDispatcher::handle after a packet has been read.
+ * One wrapper per packet id is enough: the original dispatcher is shared by
+ * all instances of that packet type, while the concrete packet is read from
+ * the shared_ptr argument.
+ */
+class WrappedPacketHandler final : public PacketDispatcher {
+public:
+    int packet_id = 0;
+    const PacketDispatcher* original = nullptr;
+
+    void handle(const void* network_id, void* callback, void* packet_ref) const override {
+        void* packet = nullptr;
+        if (packet_ref != nullptr) {
+            packet = *static_cast<void**>(packet_ref);
+        }
+        PlayerView player = player_for_network(network_id);
+        bool cancelled = packet != nullptr && dispatch_packet(packet_id, packet, player);
+        if (!cancelled && original != nullptr && original != this) {
+            original->handle(network_id, callback, packet_ref);
+        }
+    }
+
+    static PlayerView player_for_network(const void* network_id);
+    static bool dispatch_packet(int packet_id, void* packet, PlayerView& player);
+};
+
+WrappedPacketHandler g_wrappers[512];
+InlineHook g_create_packet_hook;
+bool g_packet_hook_installed = false;
+
+std::mutex& vtable_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::mutex& wrap_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<void*, int>& packet_vtables() {
+    static std::unordered_map<void*, int> ids;
+    return ids;
+}
+
+using SendPacketFn = void (*)(void*, void*);
+SendPacketFn g_send_packet_original = nullptr;
+bool g_send_packet_hook_installed = false;
+
+#ifdef _WIN32
+using CreatePacketFn = std::shared_ptr<void> (*)(int);
+CreatePacketFn g_create_packet_original = nullptr;
+#else
+using CreatePacketFn = void (*)(void*, int);
+CreatePacketFn g_create_packet_original = nullptr;
+#endif
+
+template <typename T>
+T read_value(const void* base, size_t offset) {
+    T value{};
+    std::memcpy(&value, static_cast<const unsigned char*>(base) + offset, sizeof(value));
+    return value;
+}
+
+bool read_block_pos(const void* payload, size_t offset, int& x, int& y, int& z) {
+    x = read_value<int32_t>(payload, offset);
+    y = read_value<int32_t>(payload, offset + 4);
+    z = read_value<int32_t>(payload, offset + 8);
+    if (x < -30000000 || x > 30000000 || z < -30000000 || z > 30000000 || y < -2048 || y > 2048) {
+        x = y = z = 0;
+        return false;
+    }
+    return true;
+}
+
+std::string read_string_at(const void* base, size_t offset) {
+    auto view = read_native_string(static_cast<const unsigned char*>(base) + offset, native_abi());
+    return std::string(view);
+}
+
+std::string uuid_hex(const void* data) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    std::string result;
+    result.reserve(32);
+    for (int i = 0; i < 16; ++i) {
+        result.push_back(kHex[bytes[i] >> 4]);
+        result.push_back(kHex[bytes[i] & 0x0F]);
+    }
+    return result;
+}
+
+std::string read_form_response(const void* payload) {
+    /* ModalFormResponsePacket payload: uint32 form_id, optional<string>
+     * response, optional<uint8> cancel_reason.  MSVC optional stores the
+     * engaged flag first; libc++ stores the value first and the flag after
+     * the value. */
+    if (native_abi() == NativeAbi::Msvc) {
+        const auto* optional = static_cast<const unsigned char*>(payload) + 8;
+        if (optional[0] == 0) {
+            return {};
+        }
+        return read_string_at(optional, 8);
+    }
+    const auto* optional = static_cast<const unsigned char*>(payload) + 8;
+    std::string value = read_string_at(optional, 0);
+    if (!value.empty() || optional[24] != 0) {
+        return value;
+    }
+    return {};
+}
+
+PlayerView make_player_view(void* handle) {
+    PlayerView view;
+    if (handle == nullptr) {
+        return view;
+    }
+    view.handle = handle;
+    if (auto info = players_find_by_handle(handle); info.has_value()) {
+        view.name = info->name;
+        view.xuid = info->xuid;
+        view.address = info->address;
+        view.runtime_id = info->runtime_id;
+    }
+    if (view.runtime_id == 0) {
+        view.runtime_id = live_runtime_id(handle);
+    }
+    return view;
+}
+
+PlayerView WrappedPacketHandler::player_for_network(const void* network_id) {
+    return make_player_view(live_find_player_for_network(network_id));
+}
+
+void update_state(void* handle, const PlayerState& next) {
+    if (handle == nullptr) {
+        return;
+    }
+    std::lock_guard lock(state_mutex());
+    player_states()[handle] = next;
+}
+
+bool state_for(void* handle, PlayerState& out) {
+    if (handle == nullptr) {
+        return false;
+    }
+    std::lock_guard lock(state_mutex());
+    auto it = player_states().find(handle);
+    if (it == player_states().end()) {
+        return false;
+    }
+    out = it->second;
+    return true;
+}
+
+bool detail_for_action(int action, int packet_id, const int pos[3], int face, uint64_t runtime_id,
+                       int& type, DetailEvent& detail, bool& cancellable) {
+    cancellable = false;
+    detail.packet_id = packet_id;
+    detail.action = action;
+    detail.x = pos[0];
+    detail.y = pos[1];
+    detail.z = pos[2];
+    detail.face = face;
+    detail.runtime_id = runtime_id;
+
+    switch (action) {
+    case ActionStartJump:
+        type = YOYO_EVENT_PLAYER_JUMP;
+        return true;
+    case ActionStartSprinting:
+        type = YOYO_EVENT_PLAYER_SPRINT;
+        detail.value = 1;
+        return true;
+    case ActionStopSprinting:
+        type = YOYO_EVENT_PLAYER_SPRINT;
+        detail.value = 0;
+        return true;
+    case ActionStartSneaking:
+        type = YOYO_EVENT_PLAYER_SNEAK;
+        detail.value = 1;
+        return true;
+    case ActionStopSneaking:
+        type = YOYO_EVENT_PLAYER_SNEAK;
+        detail.value = 0;
+        return true;
+    case ActionStartDestroyBlock:
+        type = YOYO_EVENT_BLOCK_START_DESTROY;
+        cancellable = true;
+        return true;
+    case ActionStopDestroyBlock:
+    case ActionCreativeDestroyBlock:
+        type = YOYO_EVENT_BLOCK_DESTROY;
+        cancellable = true;
+        return true;
+    case ActionInteractWithBlock:
+        type = YOYO_EVENT_BLOCK_INTERACT;
+        cancellable = true;
+        return true;
+    case ActionStartUsingItem:
+        type = YOYO_EVENT_ITEM_USE;
+        cancellable = true;
+        return true;
+    case ActionStartItemUseOn:
+        type = YOYO_EVENT_ITEM_USE_ON;
+        cancellable = true;
+        return true;
+    case ActionDropItem:
+        type = YOYO_EVENT_ITEM_DROP;
+        cancellable = true;
+        return true;
+    case ActionStartSleeping:
+        type = YOYO_EVENT_BED_ENTER;
+        cancellable = true;
+        return true;
+    case ActionStopSleeping:
+        type = YOYO_EVENT_BED_LEAVE;
+        cancellable = true;
+        return true;
+    case ActionRespawn:
+        type = YOYO_EVENT_PLAYER_RESPAWN;
+        cancellable = true;
+        return true;
+    case ActionHandledTeleport:
+        type = YOYO_EVENT_PLAYER_TELEPORT;
+        return true;
+    case 31: /* MissedSwing */
+        type = YOYO_EVENT_PLAYER_INTERACT;
+        return true;
+    default:
+        return false;
+    }
+}
+
+void handle_player_action(void* packet, PlayerView& player, bool& cancelled) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    int pos[3] = {0, 0, 0};
+    read_block_pos(payload, 0, pos[0], pos[1], pos[2]);
+    if (read_value<int32_t>(payload, 28) == 31) {
+        LiveVec3 current;
+        if (live_get_position(player.handle, current)) {
+            pos[0] = static_cast<int>(current.x);
+            pos[1] = static_cast<int>(current.y);
+            pos[2] = static_cast<int>(current.z);
+        }
+    }
+    const int face = read_value<int32_t>(payload, 24);
+    const int action = read_value<int32_t>(payload, 28);
+    const uint64_t runtime_id = read_value<uint64_t>(payload, 32);
+
+    PlayerState state;
+    const bool known = state_for(player.handle, state);
+    const bool was_sneaking = known && state.sneaking;
+    const bool was_sprinting = known && state.sprinting;
+    const bool was_jumping = known && state.jumping;
+    if (known) {
+        if (action == ActionStartSneaking) state.sneaking = true;
+        if (action == ActionStopSneaking) state.sneaking = false;
+        if (action == ActionStartSprinting) state.sprinting = true;
+        if (action == ActionStopSprinting) state.sprinting = false;
+        if (action == ActionStartFlying) state.flying = true;
+        if (action == ActionStopFlying) state.flying = false;
+        if (action == ActionStartJump) state.jumping = true;
+        update_state(player.handle, state);
+    }
+
+    DetailEvent raw;
+    raw.packet_id = kPacketPlayerAction;
+    raw.action = action;
+    raw.x = pos[0];
+    raw.y = pos[1];
+    raw.z = pos[2];
+    raw.face = face;
+    raw.runtime_id = runtime_id;
+    if (emit_detail(YOYO_EVENT_PLAYER_ACTION, player, raw)) {
+        cancelled = true;
+        return;
+    }
+
+    if ((action == ActionStartSneaking && was_sneaking) ||
+        (action == ActionStopSneaking && !was_sneaking) ||
+        (action == ActionStartSprinting && was_sprinting) ||
+        (action == ActionStopSprinting && !was_sprinting) ||
+        (action == ActionStartJump && was_jumping)) {
+        return;
+    }
+
+    int type = 0;
+    DetailEvent detail;
+    bool cancellable = false;
+    if (!detail_for_action(action, kPacketPlayerAction, pos, face, runtime_id, type, detail, cancellable)) {
+        return;
+    }
+    if (emit_detail(type, player, detail) && cancellable) {
+        cancelled = true;
+    }
+}
+
+void handle_auth_input(void* packet, PlayerView& player) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    const auto* bits = payload + 88;
+    uint64_t low = 0;
+    uint16_t high = 0;
+    std::memcpy(&low, bits, sizeof(low));
+    std::memcpy(&high, bits + 8, sizeof(high));
+    const auto test = [&](int bit) -> bool {
+        if (bit < 64) {
+            return (low & (uint64_t{1} << bit)) != 0;
+        }
+        return (high & (uint16_t{1} << (bit - 64))) != 0;
+    };
+
+    PlayerState state;
+    if (!state_for(player.handle, state)) {
+        state.initialized = true;
+    }
+    const bool sneaking = test(8);
+    const bool sprinting = test(20);
+    const bool flying = test(42);
+    const bool jumping = test(31) || test(6);
+
+    if (state.initialized) {
+        if (sneaking != state.sneaking) {
+            DetailEvent detail;
+            detail.packet_id = kPacketPlayerAuthInput;
+            detail.action = sneaking ? ActionStartSneaking : ActionStopSneaking;
+            detail.value = sneaking ? 1 : 0;
+            detail.x = static_cast<int>(read_value<float>(payload, 8));
+            detail.y = static_cast<int>(read_value<float>(payload, 12));
+            detail.z = static_cast<int>(read_value<float>(payload, 16));
+            emit_detail(YOYO_EVENT_PLAYER_SNEAK, player, detail);
+        }
+        if (sprinting != state.sprinting) {
+            DetailEvent detail;
+            detail.packet_id = kPacketPlayerAuthInput;
+            detail.action = sprinting ? ActionStartSprinting : ActionStopSprinting;
+            detail.value = sprinting ? 1 : 0;
+            emit_detail(YOYO_EVENT_PLAYER_SPRINT, player, detail);
+        }
+        if (jumping && !state.jumping) {
+            DetailEvent detail;
+            detail.packet_id = kPacketPlayerAuthInput;
+            detail.action = ActionStartJump;
+            detail.x = static_cast<int>(read_value<float>(payload, 8));
+            detail.y = static_cast<int>(read_value<float>(payload, 12));
+            detail.z = static_cast<int>(read_value<float>(payload, 16));
+            emit_detail(YOYO_EVENT_PLAYER_JUMP, player, detail);
+        }
+    }
+    state.initialized = true;
+    state.sneaking = sneaking;
+    state.sprinting = sprinting;
+    state.flying = flying;
+    state.jumping = jumping;
+    update_state(player.handle, state);
+}
+
+void handle_player_equipment(void* packet, PlayerView& player) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    /*
+     * The tail of MobEquipmentPacketPayload is `slot, selected_slot,
+     * container_id`.  Descriptor sizes differ between ABI versions, so look
+     * for the adjacent pair of small slot values instead of hard-coding an
+     * offset that would silently read item data.
+     */
+    int slot = -1;
+    int selected = -1;
+    for (int offset = 72; offset + 8 <= 120; offset += 4) {
+        const int a = read_value<int32_t>(payload, static_cast<size_t>(offset));
+        const int b = read_value<int32_t>(payload, static_cast<size_t>(offset) + 4);
+        if (a >= 0 && a <= 8 && b >= 0 && b <= 8) {
+            slot = a;
+            selected = b;
+            break;
+        }
+    }
+    PlayerState state;
+    if (!state_for(player.handle, state)) {
+        state.initialized = true;
+    }
+    state.held_slot = selected;
+    update_state(player.handle, state);
+    DetailEvent detail;
+    detail.packet_id = kPacketPlayerEquipment;
+    detail.slot = selected;
+    detail.value = slot;
+    emit_detail(YOYO_EVENT_PLAYER_ITEM_HELD, player, detail);
+}
+
+void handle_form_response(void* packet, PlayerView& player, bool& cancelled) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    const int32_t form_id = read_value<int32_t>(payload, 0);
+    DetailEvent detail;
+    detail.packet_id = kPacketModalFormResponse;
+    detail.value = form_id;
+    detail.text = read_form_response(payload);
+    if (emit_detail(YOYO_EVENT_FORM_RESPONSE, player, detail)) {
+        cancelled = true;
+    }
+}
+
+void handle_command(void* packet, PlayerView& player, bool& cancelled) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    DetailEvent detail;
+    detail.packet_id = kPacketCommandRequest;
+    detail.text = read_string_at(payload, 0);
+    if (emit_detail(YOYO_EVENT_PLAYER_COMMAND, player, detail)) {
+        cancelled = true;
+    }
+}
+
+void handle_emote(void* packet, PlayerView& player) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    DetailEvent detail;
+    detail.packet_id = kPacketEmote;
+    detail.text = read_string_at(payload, 8);
+    detail.text2 = read_string_at(payload, 48);
+    detail.value = read_value<uint8_t>(payload, 112);
+    emit_detail(YOYO_EVENT_PLAYER_EMOTE, player, detail);
+}
+
+void handle_skin(void* packet, PlayerView& player) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    DetailEvent detail;
+    detail.packet_id = kPacketPlayerSkin;
+    detail.text = uuid_hex(payload);
+    emit_detail(YOYO_EVENT_PLAYER_SKIN, player, detail);
+}
+
+void handle_respawn(void* packet, PlayerView& player) {
+    PlayerState state;
+    if (state_for(player.handle, state)) {
+        state.dead = false;
+        state.health = -1;
+        update_state(player.handle, state);
+    }
+    DetailEvent detail;
+    detail.packet_id = kPacketRespawn;
+    (void)packet;
+    emit_detail(YOYO_EVENT_PLAYER_RESPAWN, player, detail);
+}
+
+bool WrappedPacketHandler::dispatch_packet(int packet_id, void* packet, PlayerView& player) {
+    if (packet == nullptr) {
+        return false;
+    }
+
+    DetailEvent generic;
+    generic.packet_id = packet_id;
+    if (emit_detail(YOYO_EVENT_PACKET_RECEIVE, player, generic)) {
+        return true;
+    }
+
+    bool cancelled = false;
+    switch (packet_id) {
+    case kPacketPlayerAction:
+        if (player.handle != nullptr) {
+            handle_player_action(packet, player, cancelled);
+        }
+        break;
+    case kPacketPlayerAuthInput:
+        if (player.handle != nullptr) {
+            handle_auth_input(packet, player);
+        }
+        break;
+    case kPacketPlayerEquipment:
+        if (player.handle != nullptr) {
+            handle_player_equipment(packet, player);
+        }
+        break;
+    case kPacketModalFormResponse:
+        if (player.handle != nullptr) {
+            handle_form_response(packet, player, cancelled);
+        }
+        break;
+    case kPacketCommandRequest:
+        if (player.handle != nullptr) {
+            handle_command(packet, player, cancelled);
+        }
+        break;
+    case kPacketEmote:
+        if (player.handle != nullptr) {
+            handle_emote(packet, player);
+        }
+        break;
+    case kPacketPlayerSkin:
+        if (player.handle != nullptr) {
+            handle_skin(packet, player);
+        }
+        break;
+    case kPacketRespawn:
+        if (player.handle != nullptr) {
+            handle_respawn(packet, player);
+        }
+        break;
+    case kPacketInteract:
+    case kPacketContainerOpen:
+    case kPacketContainerClose:
+    default:
+        break;
+    }
+    return cancelled;
+}
+
+void remember_packet_vtable(void* packet, int packet_id) {
+    if (packet == nullptr) {
+        return;
+    }
+    void* vtable = *static_cast<void**>(packet);
+    if (vtable == nullptr) {
+        return;
+    }
+    std::lock_guard lock(vtable_mutex());
+    packet_vtables()[vtable] = packet_id;
+}
+
+int packet_id_for(void* packet) {
+    if (packet == nullptr) {
+        return -1;
+    }
+    void* vtable = *static_cast<void**>(packet);
+    std::lock_guard lock(vtable_mutex());
+    auto it = packet_vtables().find(vtable);
+    return it == packet_vtables().end() ? -1 : it->second;
+}
+
+bool is_bulk_packet(int packet_id) {
+    switch (packet_id) {
+    case 39:  /* SetActorData */
+    case 58:  /* FullChunkData */
+    case 121: /* NetworkChunkPublisherUpdate */
+    case 122: /* BiomeDefinitionList */
+    case 123: /* LevelSoundEvent */
+    case 124: /* LevelEventGeneric */
+    case 130: /* OnScreenTextureAnimation */
+    case 172: /* UpdateSubChunkBlocks */
+    case 174: /* SubChunkPacket */
+    case 175: /* SubChunkRequestPacket */
+        return true;
+    default:
+        return false;
+    }
+}
+
+void handle_outgoing_health(PlayerView& player, void* packet) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    const int health = read_value<int32_t>(payload, 0);
+    PlayerState state;
+    if (!state_for(player.handle, state)) {
+        state.initialized = true;
+    }
+    const bool changed = state.health != health;
+    const bool was_dead = state.dead;
+    state.health = health;
+    state.dead = health <= 0;
+    update_state(player.handle, state);
+    if (changed) {
+        DetailEvent detail;
+        detail.packet_id = kPacketSetHealth;
+        detail.value = health;
+        emit_detail(YOYO_EVENT_PLAYER_HEALTH, player, detail);
+    }
+    if (health <= 0 && !was_dead) {
+        DetailEvent detail;
+        detail.packet_id = kPacketSetHealth;
+        emit_detail(YOYO_EVENT_PLAYER_DIE, player, detail);
+    }
+}
+
+void send_packet_detour(void* player_handle, void* packet) {
+    const int packet_id = packet_id_for(packet);
+    bool cancelled = false;
+    if (player_handle != nullptr && packet_id >= 0) {
+        PlayerView player = make_player_view(player_handle);
+        if (packet_id == kPacketSetHealth) {
+            handle_outgoing_health(player, packet);
+        } else if (packet_id == kPacketRespawn) {
+            PlayerState state;
+            if (state_for(player_handle, state)) {
+                state.dead = false;
+                state.health = -1;
+                update_state(player_handle, state);
+            }
+        } else if (packet_id == kPacketDeathInfo) {
+            PlayerState state;
+            if (!state_for(player_handle, state) || !state.dead) {
+                state.dead = true;
+                update_state(player_handle, state);
+                DetailEvent detail;
+                detail.packet_id = kPacketDeathInfo;
+                emit_detail(YOYO_EVENT_PLAYER_DIE, player, detail);
+            }
+        }
+        if (!is_bulk_packet(packet_id) &&
+            (event_has_listener(YOYO_EVENT_PACKET_SEND) || js::has_listener("onPacketSend"))) {
+            DetailEvent detail;
+            detail.packet_id = packet_id;
+            cancelled = emit_detail(YOYO_EVENT_PACKET_SEND, player, detail);
+        }
+    }
+    if (!cancelled && g_send_packet_original != nullptr) {
+        g_send_packet_original(player_handle, packet);
+    }
+}
+
+void wrap_packet(void* packet, int packet_id) {
+    if (packet == nullptr || packet_id < 0 || packet_id >= static_cast<int>(std::size(g_wrappers))) {
+        return;
+    }
+    remember_packet_vtable(packet, packet_id);
+    std::lock_guard lock(wrap_mutex());
+    auto** handler_slot = reinterpret_cast<void**>(static_cast<unsigned char*>(packet) + kPacketHandlerOffset);
+    void* handler = *handler_slot;
+    if (handler == nullptr) {
+        return;
+    }
+    auto& wrapper = g_wrappers[packet_id];
+    if (handler == &wrapper) {
+        return;
+    }
+    wrapper.packet_id = packet_id;
+    wrapper.original = reinterpret_cast<const PacketDispatcher*>(handler);
+    *handler_slot = &wrapper;
+}
+
+#ifdef _WIN32
+std::shared_ptr<void> create_packet_detour(int packet_id) {
+    auto packet = g_create_packet_original != nullptr ? g_create_packet_original(packet_id) : std::shared_ptr<void>{};
+    wrap_packet(packet.get(), packet_id);
+    return packet;
+}
+#else
+void create_packet_detour(void* output, int packet_id) {
+    if (g_create_packet_original == nullptr) {
+        return;
+    }
+    g_create_packet_original(output, packet_id);
+    wrap_packet(*reinterpret_cast<void**>(output), packet_id);
+}
+#endif
+
+} // namespace
+
+bool install_packet_hooks() {
+    if (g_packet_hook_installed) {
+        return true;
+    }
+    const auto* version = state().profile;
+    if (version == nullptr) {
+        log_write(LogLevel::Error, "cannot install packet hook: no version profile");
+        return false;
+    }
+    const auto& live = version->live;
+    if (live.create_packet.rva == 0 || live.create_packet_hook_length < 12) {
+        log_write(LogLevel::Warn, "packet factory hook is not described for this build");
+        return false;
+    }
+    void* target = reinterpret_cast<void*>(state().module.base + live.create_packet.rva);
+    bool ok = false;
+#ifdef _WIN32
+    ok = install_inline_hook(g_create_packet_hook, target, live.create_packet.bytes,
+                             live.create_packet_hook_length,
+                             reinterpret_cast<void*>(&create_packet_detour));
+#else
+    void* jcc_target = nullptr;
+    if (live.create_packet_jcc_offset != 0) {
+        jcc_target = static_cast<unsigned char*>(target) + live.create_packet_jcc_target_offset;
+    }
+    ok = install_inline_hook_short(g_create_packet_hook, target, live.create_packet.bytes,
+                                   live.create_packet_hook_length,
+                                   reinterpret_cast<void*>(&create_packet_detour),
+                                   live.create_packet_jcc_offset,
+                                   live.create_packet_jcc_offset != 0 ? 2 : 0,
+                                   jcc_target);
+#endif
+    if (!ok) {
+        log_write(LogLevel::Error, "failed to install MinecraftPackets::createPacket hook at rva=0x%llx",
+                  static_cast<unsigned long long>(live.create_packet.rva));
+        return false;
+    }
+    g_create_packet_original = reinterpret_cast<CreatePacketFn>(g_create_packet_hook.trampoline);
+    g_packet_hook_installed = true;
+    log_write(LogLevel::Info, "packet factory hook installed rva=0x%llx length=%u",
+              static_cast<unsigned long long>(live.create_packet.rva), live.create_packet_hook_length);
+    return true;
+}
+
+void* packet_send_hook_address() {
+    return reinterpret_cast<void*>(&send_packet_detour);
+}
+
+void* packet_send_original_address() {
+    return reinterpret_cast<void*>(g_send_packet_original);
+}
+
+bool install_packet_send_hook(void* player) {
+    if (g_send_packet_hook_installed) {
+        return true;
+    }
+    if (player == nullptr) {
+        return false;
+    }
+    const auto* version = state().profile;
+    if (version == nullptr || version->live.send_network_packet_slot == 0) {
+        return false;
+    }
+    auto** vtable = *reinterpret_cast<void***>(player);
+    if (vtable == nullptr) {
+        return false;
+    }
+    const int slot = static_cast<int>(version->live.send_network_packet_slot / sizeof(void*));
+    const char* error = nullptr;
+    if (!install_vtable_hook(player, slot, reinterpret_cast<void*>(&send_packet_detour),
+                             reinterpret_cast<void**>(&g_send_packet_original), nullptr, 0, &error)) {
+        log_write(LogLevel::Warn, "sendNetworkPacket hook failed: %s", error ? error : "unknown error");
+        return false;
+    }
+    g_send_packet_hook_installed = true;
+    log_write(LogLevel::Info, "sendNetworkPacket vtable hook installed slot=%d", slot);
+    return true;
+}
+
+bool packet_player_is_sneaking(void* player) {
+    PlayerState state;
+    return state_for(player, state) && state.sneaking;
+}
+
+bool packet_player_is_sprinting(void* player) {
+    PlayerState state;
+    return state_for(player, state) && state.sprinting;
+}
+
+bool packet_player_is_flying(void* player) {
+    PlayerState state;
+    return state_for(player, state) && state.flying;
+}
+
+int packet_player_held_slot(void* player) {
+    PlayerState state;
+    return state_for(player, state) ? state.held_slot : -1;
+}
+
+int packet_player_health(void* player) {
+    PlayerState state;
+    return state_for(player, state) ? state.health : -1;
+}
+
+void packet_forget_player(void* player) {
+    std::lock_guard lock(state_mutex());
+    player_states().erase(player);
+}
+
+void packet_clear() {
+    std::lock_guard lock(state_mutex());
+    player_states().clear();
+}
+
+} // namespace yoyo

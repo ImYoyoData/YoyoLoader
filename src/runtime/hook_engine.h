@@ -58,6 +58,22 @@ bool install_inline_hook_reloc(InlineHook& hook,
                                size_t disp_offset,
                                size_t instruction_length);
 
+/*
+ * Install an inline hook when the shortest safe prologue is 12 bytes (a
+ * 12-byte `mov rax, imm64; jmp rax` patch is used instead of the usual
+ * 14-byte indirect jump).  If `jcc_offset` is not zero, the 2-byte short
+ * conditional branch at that offset is rewritten in the trampoline as a
+ * 6-byte near branch to `jcc_target`.
+ */
+bool install_inline_hook_short(InlineHook& hook,
+                               void* target,
+                               const uint8_t* expected,
+                               size_t expected_length,
+                               void* detour,
+                               size_t jcc_offset = 0,
+                               size_t jcc_length = 0,
+                               void* jcc_target = nullptr);
+
 void* alloc_executable(size_t size);
 void* alloc_executable_near(void* near_address, size_t size);
 void free_executable(void* ptr, size_t size);

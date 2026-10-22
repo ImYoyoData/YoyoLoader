@@ -2,6 +2,7 @@
 
 #include "hooks.h"
 #include "log.h"
+#include "packet_events.h"
 #include "plugin_loader.h"
 #include "worlds.h"
 
@@ -35,6 +36,9 @@ void runtime_start() {
     if (!install_player_hooks()) {
         log_write(LogLevel::Error, "player hooks could not be installed");
         return;
+    }
+    if (!install_packet_hooks()) {
+        log_write(LogLevel::Warn, "packet detail events are unavailable for this build");
     }
 
     worlds::initialize();

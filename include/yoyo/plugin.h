@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define YOYO_PLUGIN_ABI_VERSION 2u
+#define YOYO_PLUGIN_ABI_VERSION 3u
 
 #ifdef _WIN32
 #  define YOYO_EXPORT __declspec(dllexport)
@@ -32,7 +32,33 @@ typedef enum yoyo_event_type {
     YOYO_EVENT_SERVER_READY = 5,
     YOYO_EVENT_TICK = 6,     /* one server tick */
     YOYO_EVENT_PLAYER_MOVE = 7,
-    YOYO_EVENT_PLAYER_CHANGE_DIMENSION = 8
+    YOYO_EVENT_PLAYER_CHANGE_DIMENSION = 8,
+    YOYO_EVENT_PLAYER_JUMP = 9,
+    YOYO_EVENT_PLAYER_SNEAK = 10,          /* value: 1 started, 0 stopped */
+    YOYO_EVENT_PLAYER_SPRINT = 11,         /* value: 1 started, 0 stopped */
+    YOYO_EVENT_PLAYER_ACTION = 12,         /* raw PlayerActionPacket */
+    YOYO_EVENT_BLOCK_START_DESTROY = 13,
+    YOYO_EVENT_BLOCK_DESTROY = 14,
+    YOYO_EVENT_BLOCK_INTERACT = 15,
+    YOYO_EVENT_ITEM_USE = 16,
+    YOYO_EVENT_ITEM_USE_ON = 17,
+    YOYO_EVENT_ITEM_DROP = 18,
+    YOYO_EVENT_BED_ENTER = 19,
+    YOYO_EVENT_BED_LEAVE = 20,
+    YOYO_EVENT_PLAYER_COMMAND = 21,        /* text: command, cancellable */
+    YOYO_EVENT_FORM_RESPONSE = 22,         /* value: form id, text: response, cancellable */
+    YOYO_EVENT_PLAYER_SKIN = 23,           /* text: UUID */
+    YOYO_EVENT_PLAYER_EMOTE = 24,          /* text: piece id, text2: xuid */
+    YOYO_EVENT_PLAYER_RESPAWN = 25,
+    YOYO_EVENT_PLAYER_TELEPORT = 26,
+    YOYO_EVENT_PLAYER_GAME_MODE = 27,      /* value: new game mode */
+    YOYO_EVENT_PLAYER_ITEM_HELD = 28,      /* slot: selected slot, value: previous slot */
+    YOYO_EVENT_PACKET_RECEIVE = 29,        /* packet_id, cancellable */
+    YOYO_EVENT_PLAYER_INTERACT = 30,
+    YOYO_EVENT_PLAYER_ATTACK = 31,         /* runtime_id: target */
+    YOYO_EVENT_PLAYER_HEALTH = 32,         /* value: current health */
+    YOYO_EVENT_PLAYER_DIE = 33,
+    YOYO_EVENT_PACKET_SEND = 34            /* packet_id, cancellable */
 } yoyo_event_type;
 
 /*
@@ -99,6 +125,35 @@ typedef struct yoyo_player_dimension_event {
     int to_dimension;
 } yoyo_player_dimension_event;
 
+/*
+ * Shared payload for the detail events added in ABI 3.  Unused fields are
+ * zero (or -1 for slot/face) and must be ignored for the event type.
+ *
+ *  - action:     PlayerActionType for action/block/item events
+ *  - x/y/z:      block position, or target position for teleport
+ *  - face:       block face
+ *  - slot:       selected hotbar slot for PLAYER_ITEM_HELD
+ *  - runtime_id: target actor runtime id (attack/interact) or packet actor id
+ *  - value:      state boolean, game mode, form id, or previous hotbar slot
+ *  - text:       command, form response, skin UUID, or emote piece id
+ *  - text2:      emote xuid
+ */
+typedef struct yoyo_detail_event {
+    yoyo_player_view player;
+    int packet_id;
+    int action;
+    int x;
+    int y;
+    int z;
+    int face;
+    int slot;
+    uint64_t runtime_id;
+    int value;
+    const char *text;
+    const char *text2;
+    int *cancelled;
+} yoyo_detail_event;
+
 typedef void(YOYO_CALL *yoyo_event_callback)(void *user, int type, const void *event);
 
 typedef struct yoyo_api {
@@ -118,7 +173,7 @@ typedef struct yoyo_api {
     int (*unregister_event)(int type, yoyo_event_callback callback, void *user);
 
     /*
-     * Live game bridge (ABI 2).  `player` is the opaque ServerPlayer handle
+     * Live game bridge (ABI 2+).  `player` is the opaque ServerPlayer handle
      * delivered in yoyo_player_view.  All functions return 0 on success.
      */
     int (*player_send_message)(void *player, const char *message);
@@ -133,6 +188,20 @@ typedef struct yoyo_api {
     int (*player_send_form)(void *player, const char *json);
     int (*player_get_game_mode)(void *player);
     int (*player_set_game_mode)(void *player, int mode);
+
+    /* ABI 3 additions.  State getters return -1 when the packet has not been
+     * observed yet; booleans return 0/1. */
+    int (*player_get_health)(void *player);
+    int (*player_is_sneaking)(void *player);
+    int (*player_is_sprinting)(void *player);
+    int (*player_is_flying)(void *player);
+    int (*player_get_held_slot)(void *player);
+    int (*player_send_tip)(void *player, const char *message);
+    int (*player_send_popup)(void *player, const char *message);
+    int (*player_send_system_message)(void *player, const char *message);
+    int (*player_send_toast)(void *player, const char *title, const char *content);
+    int (*player_reset_title)(void *player);
+    int (*player_transfer)(void *player, const char *host, int port);
 } yoyo_api;
 
 typedef const yoyo_api *(YOYO_CALL *yoyo_plugin_entry_fn)(const yoyo_api *api);

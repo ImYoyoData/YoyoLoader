@@ -17,6 +17,9 @@ struct Prologue {
  */
 struct LiveProfile {
     Prologue create_packet;
+    uint32_t create_packet_hook_length = 14;
+    uint32_t create_packet_jcc_offset = 0;
+    uint32_t create_packet_jcc_target_offset = 0;
     Prologue level_tick;
     uint32_t level_tick_rip_offset = 0;
     uint32_t level_tick_rip_instruction_length = 0;
