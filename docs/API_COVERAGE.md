@@ -118,7 +118,7 @@
 
 ## 已实测清单（Windows + Linux）
 
-- 服务器启动、注入、四条 inline hook + `_onPlayerLeft` 安装
+- 服务器启动、注入、原有 inline hook + `_onPlayerLeft` 安装（本轮之前）
 - pre_join / join / left 事件
 - onTick / onPlayerMove（Windows/Linux 实测）
 - 玩家位置、脚位、朝向、维度
@@ -129,7 +129,7 @@
 - 正常退出后 online count 归零
 - C++ 插件在 join 时发送消息并读取位置/维度
 - 游戏模式设置与读取（缓存回退）
-- 多世界：`world2` 以独立 BDS 进程启动在 19142，卸载后退出
+- 多世界（Windows）：`world2` 以独立 BDS 进程启动在 19142，卸载后退出
 - TransferPacket 目标地址/端口正确（bot 收到）
 - 真实客户端跨 NetherNet 端口重连尚未验证
 
@@ -142,4 +142,7 @@
   FormResponse、Skin/Emote/ItemHeld、Health/Die、PacketSend/Receive）。
   这些代码已通过 Windows 编译和 hook 分支自测，但按照本轮要求没有启动服务器，
   需要在真实客户端上做一轮回归。
-- Linux 多世界新代码已写入，但本机没有 Linux 工具链，未做编译/运行验证。
+- Linux 多世界新代码已写入，并在 `gcc:13` 容器中完成全量编译/链接检查；
+  尚未在本轮启动服务器做运行验证。
+- Windows 的 12 字节短 hook 和 Linux 的 12 字节短 hook 都做了独立分支跳转自测
+  （`low=42 high=7`）。
