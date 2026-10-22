@@ -211,6 +211,57 @@ form.sendTo(player);
 Item/Block/Container/Entity 的 `mc.newItem` / `mc.newBlock` / `mc.newContainer` /
 `mc.newEntity` 仍是本地数据模型，适合构造参数或测试；不能修改真实世界。
 
+## 5.5 多世界与多核
+
+### 单世界多核：不可安全实现
+
+BDS 的 `Level::tick`、实体/方块更新、全局注册表和玩家状态共享同一套可变状态。
+通过外部 hook 把同一世界的 tick 拆到多个线程，需要给引擎内部大量容器加锁并保证
+顺序一致；在无法修改 BDS 源码的前提下，这会导致随机崩溃、状态撕裂和存档损坏。
+因此 YoyoLoader **不会**伪造“单世界多线程”，也没有把 `Level::tick` 并行化。
+
+### 多进程多世界：可以真正用多核
+
+YoyoLoader 内置了多世界管理器。每个世界是一个独立的 `bedrock_server.exe`
+进程，拥有自己的存档、端口和 tick 线程；操作系统可以把不同世界调度到不同核心。
+主世界是 controller，子世界由主世界按需启动。
+
+配置文件 `yoyo_worlds.ini`（服务器根目录）：
+
+```text
+# name|port|level
+main|19132|world
+world2|19142|world2
+```
+
+OP 列表 `yoyo_ops.txt`，一行一个 XUID：
+
+```text
+2535405997872704
+```
+
+游戏内聊天命令：
+
+```text
+!world list
+!world current
+!world load world2
+!world unload world2
+!world switch world2
+```
+
+- 所有世界命令都要求 XUID 出现在 `yoyo_ops.txt`。
+- `load` / `unload` 只能在主世界（controller）执行。
+- `switch` 会下发真实 `TransferPacket`，客户端重连到目标世界端口。
+- 子世界目录在 `instances/<name>`，服务器文件用硬链接复用（跨卷时回退为复制），
+  存档目录独立。
+- 已实测：`world2` 启动为第二个 BDS 进程（19142）、卸载后进程退出；
+  bot 收到了目标地址/端口正确的 TransferPacket。
+- 真实客户端从 NetherNet 主世界重连到子世界端口的完整链路仍需要客户端实测；
+  如果客户端不接受直接端口 Transfer，需要再补 NetherNet 发现/网络 ID。
+
+`load` 在等待子进程端口就绪时会阻塞主线程数秒，这是当前原型的已知代价。
+
 ## 6. 插件 ABI
 
 插件必须导出：

@@ -3,6 +3,7 @@
 #include "hooks.h"
 #include "log.h"
 #include "plugin_loader.h"
+#include "worlds.h"
 
 namespace yoyo {
 namespace {
@@ -36,6 +37,7 @@ void runtime_start() {
         return;
     }
 
+    worlds::initialize();
     start_plugin_loader();
 }
 

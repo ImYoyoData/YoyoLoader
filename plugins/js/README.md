@@ -94,6 +94,22 @@ cross-dimension requests. `getGameMode` prefers the live GameType component and
 falls back to the value set through `setGameMode` (default 0) if the component
 cannot be read.
 
+## Worlds / multiverse
+
+```js
+mc.worlds.list();          // [{ name, port, level, loaded, current }]
+mc.worlds.current();       // current instance name
+mc.worlds.isController();  // true on the main server
+mc.worlds.load("world2");  // controller only
+mc.worlds.unload("world2");// controller only
+mc.worlds.switch(player, "world2"); // sends a real TransferPacket
+mc.worlds.isOp(player);    // XUID is listed in yoyo_ops.txt
+```
+
+See `yoyo_worlds.ini` and `yoyo_ops.txt` in the server directory. The sample
+`plugins/world_commands.js` implements the op-only `!world` chat commands.
+`player.transfer(host, port)` is also available for custom transfer logic.
+
 ## Server / level helpers
 
 ```js

@@ -23,6 +23,7 @@ constexpr int kPacketText = 9;
 constexpr int kPacketSetTitle = 88;
 constexpr int kPacketShowModalForm = 100;
 constexpr int kPacketToastRequest = 186;
+constexpr int kPacketTransfer = 85;
 
 constexpr uint32_t kRuntimeIdHash = 0xFC0DBBB5u;
 constexpr uint32_t kUniqueIdHash = 0x18F957AFu;
@@ -433,6 +434,21 @@ bool live_send_form(void* player, std::string_view form_json) {
     if (!write_owned_string(payload + 8, form_json)) {
         return false;
     }
+    return send_network_packet(player, packet.get());
+}
+
+bool live_transfer(void* player, std::string_view host, int port) {
+    NativePacket packet(kPacketTransfer);
+    if (!packet) {
+        log_write(LogLevel::Warn, "TransferPacket allocation failed");
+        return false;
+    }
+    auto* payload = static_cast<unsigned char*>(packet.get()) + kPacketBaseSize;
+    if (!write_owned_string(payload, host)) {
+        return false;
+    }
+    const int destination_port = port;
+    std::memcpy(payload + native_string_size(native_abi()), &destination_port, sizeof(destination_port));
     return send_network_packet(player, packet.get());
 }
 

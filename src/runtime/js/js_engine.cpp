@@ -7,6 +7,7 @@
 #include "../native_string.h"
 #include "../players.h"
 #include "../runtime.h"
+#include "../worlds.h"
 
 #include <cstring>
 #include <filesystem>
@@ -316,6 +317,16 @@ JSValue player_teleport(JSContext* ctx, JSValueConst this_val, int argc, JSValue
     return JS_NewBool(ctx, live_teleport(handle, position, dimension));
 }
 
+JSValue player_transfer(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "transfer(host, port) requires two arguments");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    std::string host = to_std_string(ctx, argv[0]);
+    int32_t port = 0;
+    if (JS_ToInt32(ctx, &port, argv[1]) < 0) return JS_EXCEPTION;
+    return JS_NewBool(ctx, live_transfer(handle, host, port));
+}
+
 JSValue player_kick(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
@@ -336,6 +347,56 @@ JSValue mc_broadcast(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
         }
     }
     return JS_NewInt32(ctx, sent);
+}
+
+JSValue mc_worlds_list(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    JSValue array = JS_NewArray(ctx);
+    uint32_t index = 0;
+    for (const auto& world : worlds::list()) {
+        JSValue object = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, object, "name", JS_NewString(ctx, world.name.c_str()));
+        JS_SetPropertyStr(ctx, object, "port", JS_NewInt32(ctx, world.port));
+        JS_SetPropertyStr(ctx, object, "level", JS_NewString(ctx, world.level.c_str()));
+        JS_SetPropertyStr(ctx, object, "loaded", JS_NewBool(ctx, world.loaded));
+        JS_SetPropertyStr(ctx, object, "current", JS_NewBool(ctx, world.current));
+        JS_SetPropertyUint32(ctx, array, index++, object);
+    }
+    return array;
+}
+
+JSValue mc_worlds_load(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "worlds.load(name) requires an argument");
+    return JS_NewBool(ctx, worlds::load(to_std_string(ctx, argv[0])));
+}
+
+JSValue mc_worlds_unload(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "worlds.unload(name) requires an argument");
+    return JS_NewBool(ctx, worlds::unload(to_std_string(ctx, argv[0])));
+}
+
+JSValue mc_worlds_switch(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 2 || !JS_IsObject(argv[0])) {
+        return JS_ThrowTypeError(ctx, "worlds.switch(player, name) requires a player and a world");
+    }
+    void* handle = player_handle(ctx, argv[0]);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    return JS_NewBool(ctx, worlds::switch_player(handle, to_std_string(ctx, argv[1])));
+}
+
+JSValue mc_worlds_is_op(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || !JS_IsObject(argv[0])) return JS_FALSE;
+    JSValue value = JS_GetPropertyStr(ctx, argv[0], "xuid");
+    std::string xuid = to_std_string(ctx, value);
+    JS_FreeValue(ctx, value);
+    return JS_NewBool(ctx, worlds::is_op(xuid));
+}
+
+JSValue mc_worlds_is_controller(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewBool(ctx, worlds::is_controller());
+}
+
+JSValue mc_worlds_current(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewString(ctx, worlds::current_world().c_str());
 }
 
 JSValue mc_get_level(JSContext* ctx, JSValueConst, int, JSValueConst*) {
@@ -516,6 +577,17 @@ void register_mc(JSContext* ctx) {
                       JS_NewCFunction(ctx, mc_get_module_base, "getModuleBase", 0));
     JS_SetPropertyStr(ctx, mc, "broadcast", JS_NewCFunction(ctx, mc_broadcast, "broadcast", 1));
     JS_SetPropertyStr(ctx, mc, "getLevel", JS_NewCFunction(ctx, mc_get_level, "getLevel", 0));
+
+    JSValue worlds = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, worlds, "list", JS_NewCFunction(ctx, mc_worlds_list, "list", 0));
+    JS_SetPropertyStr(ctx, worlds, "load", JS_NewCFunction(ctx, mc_worlds_load, "load", 1));
+    JS_SetPropertyStr(ctx, worlds, "unload", JS_NewCFunction(ctx, mc_worlds_unload, "unload", 1));
+    JS_SetPropertyStr(ctx, worlds, "switch", JS_NewCFunction(ctx, mc_worlds_switch, "switch", 2));
+    JS_SetPropertyStr(ctx, worlds, "isOp", JS_NewCFunction(ctx, mc_worlds_is_op, "isOp", 1));
+    JS_SetPropertyStr(ctx, worlds, "isController",
+                      JS_NewCFunction(ctx, mc_worlds_is_controller, "isController", 0));
+    JS_SetPropertyStr(ctx, worlds, "current", JS_NewCFunction(ctx, mc_worlds_current, "current", 0));
+    JS_SetPropertyStr(ctx, mc, "worlds", worlds);
     JS_SetPropertyStr(ctx, mc, "runcmd", JS_NewCFunction(ctx, mc_unsupported, "runcmd", 1));
     JS_SetPropertyStr(ctx, mc, "runcmdEx", JS_NewCFunction(ctx, mc_unsupported, "runcmdEx", 1));
     JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_unsupported, "getBlock", 1));
@@ -649,6 +721,7 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
     JS_SetPropertyStr(ctx, object, "sendForm", JS_NewCFunction(ctx, player_send_form, "sendForm", 1));
     JS_SetPropertyStr(ctx, object, "send_form", JS_NewCFunction(ctx, player_send_form, "send_form", 1));
     JS_SetPropertyStr(ctx, object, "kick", JS_NewCFunction(ctx, player_kick, "kick", 1));
+    JS_SetPropertyStr(ctx, object, "transfer", JS_NewCFunction(ctx, player_transfer, "transfer", 2));
     JS_SetPropertyStr(ctx, object, "getPosition", JS_NewCFunction(ctx, player_get_position, "getPosition", 0));
     JS_SetPropertyStr(ctx, object, "get_position", JS_NewCFunction(ctx, player_get_position, "get_position", 0));
     JS_SetPropertyStr(ctx, object, "getLocation", JS_NewCFunction(ctx, player_get_location, "getLocation", 0));

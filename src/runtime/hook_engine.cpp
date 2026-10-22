@@ -114,11 +114,11 @@ void* alloc_executable(size_t size) {
 #endif
 }
 
-void* alloc_executable_near(void* near, size_t size) {
-    if (near == nullptr) {
+void* alloc_executable_near(void* near_address, size_t size) {
+    if (near_address == nullptr) {
         return nullptr;
     }
-    const uintptr_t target = reinterpret_cast<uintptr_t>(near);
+    const uintptr_t target = reinterpret_cast<uintptr_t>(near_address);
 #ifdef _WIN32
     const intptr_t offsets[] = {0x10000000, -0x10000000, 0x20000000, -0x20000000,
                                 0x30000000, -0x30000000, 0x40000000, -0x40000000};

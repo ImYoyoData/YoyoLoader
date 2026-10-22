@@ -91,6 +91,8 @@
 | `mc.getModuleBase` | ✅ |
 | `mc.broadcast` | ✅ 真实 TextPacket，发送给在线玩家 |
 | `mc.getLevel` | 🟡 轻量对象，仅玩家列表/数量 |
+| `mc.worlds.list/current/isController/load/unload/switch/isOp` | ✅ Windows 原型；多进程世界 |
+| `player.transfer(host, port)` | ✅ 真实 TransferPacket |
 | `mc.runcmd` / `mc.runcmdEx` | ❌ 需要 CommandOrigin / MinecraftCommands |
 | Scoreboard / BossBar / Map / Boss Event | ❌ |
 | 世界时间 / 天气 | ❌ |
@@ -116,6 +118,9 @@
 - 正常退出后 online count 归零
 - C++ 插件在 join 时发送消息并读取位置/维度
 - 游戏模式设置与读取（缓存回退）
+- 多世界：`world2` 以独立 BDS 进程启动在 19142，卸载后退出
+- TransferPacket 目标地址/端口正确（bot 收到）
+- 真实客户端跨 NetherNet 端口重连尚未验证
 
 ## 尚未实测 / 需要真实客户端
 

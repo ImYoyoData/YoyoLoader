@@ -35,6 +35,7 @@ cl %COMMON% /DYOYO_PLATFORM_WINDOWS=1 /DYOYO_RUNTIME_BUILD=1 /Iinclude /Isrc\run
     src\runtime\hook_engine.cpp ^
     src\runtime\hooks.cpp ^
     src\runtime\live.cpp ^
+    src\runtime\worlds.cpp ^
     src\runtime\events.cpp ^
     src\runtime\plugin_loader.cpp ^
     src\runtime\players.cpp ^
@@ -43,7 +44,7 @@ cl %COMMON% /DYOYO_PLATFORM_WINDOWS=1 /DYOYO_RUNTIME_BUILD=1 /Iinclude /Isrc\run
     src\runtime\js\js_nbt.cpp ^
     src\runtime\js\js_forms.cpp ^
     build\obj\qjs\quickjs.obj build\obj\qjs\dtoa.obj build\obj\qjs\libregexp.obj build\obj\qjs\libunicode.obj ^
-    /Fo:build\obj\ /Fe:build\bin\yoyo_runtime.dll
+    ws2_32.lib /Fo:build\obj\ /Fe:build\bin\yoyo_runtime.dll
 if errorlevel 1 exit /b 1
 
 echo [build] yoyo.exe

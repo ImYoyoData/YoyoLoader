@@ -46,6 +46,7 @@ bool live_send_toast(void* player, std::string_view title, std::string_view cont
 
 /* Player::sendForm(ModalFormRequestPacket). */
 bool live_send_form(void* player, std::string_view form_json);
+bool live_transfer(void* player, std::string_view host, int port);
 
 /* Actor geometry.  getPosition returns the eye position BDS stores in
  * StateVectorComponent; getFeetPosition subtracts the player eye height. */

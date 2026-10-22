@@ -319,3 +319,14 @@ Windows 验证时，在 `version.cpp` 中填入两个 handler 的 RVA 和序言�
   实时 Block/Item/Container/Entity 尚未接入。
 - `pre_join` 的 IP 字段为空；`PlayerAuthenticationInfo` 不含客户端地址。
 - `getUniqueId` 返回原始 `ActorUniqueID`，当前版本可能表现为负数。
+
+## 10. 多核与多世界
+
+- 单世界 tick 不能安全并行：`Level::tick` 和全局 Actor/Block/Inventory 状态没有为外部
+  并发访问加锁。YoyoLoader 不尝试拆分单世界 tick。
+- 多世界采用多进程：主世界 controller 启动额外 `yoyo.exe`，每个子世界是独立
+  `bedrock_server.exe`，因此不同世界可以被 OS 调度到不同核心。
+- 子世界通过硬链接复用服务器文件，拥有独立的 `worlds/<level>` 存档和端口；
+  `TransferPacket` 用于客户端切换。
+- 多世界命令只在主世界 controller 上执行 load/unload；所有命令用
+  `yoyo_ops.txt` 做 XUID 白名单。

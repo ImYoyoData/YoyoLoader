@@ -59,7 +59,7 @@ bool install_inline_hook_reloc(InlineHook& hook,
                                size_t instruction_length);
 
 void* alloc_executable(size_t size);
-void* alloc_executable_near(void* near, size_t size);
+void* alloc_executable_near(void* near_address, size_t size);
 void free_executable(void* ptr, size_t size);
 
 } // namespace yoyo

@@ -27,6 +27,7 @@ set(YOYO_RUNTIME_SOURCES
     src/runtime/hook_engine.cpp
     src/runtime/hooks.cpp
     src/runtime/live.cpp
+    src/runtime/worlds.cpp
     src/runtime/events.cpp
     src/runtime/plugin_loader.cpp
     src/runtime/players.cpp
@@ -45,6 +46,7 @@ if (WIN32)
         $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
         $<$<COMPILE_LANGUAGE:C>:/std:c11>)
     target_include_directories(yoyo_runtime PRIVATE include src/runtime third_party/quickjs)
+    target_link_libraries(yoyo_runtime PRIVATE ws2_32)
     set_target_properties(yoyo_runtime PROPERTIES OUTPUT_NAME yoyo_runtime PREFIX "" FOLDER runtime)
 
     add_executable(yoyo src/launcher/main.cpp src/launcher/win_inject.cpp)
