@@ -2,16 +2,19 @@
 
 #include "events.h"
 #include "hook_engine.h"
+#include "live.h"
 #include "log.h"
 #include "native_string.h"
 #include "players.h"
 #include "runtime.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace yoyo {
@@ -21,6 +24,10 @@ InlineHook g_try_hook;
 InlineHook g_disconnect_hook;
 InlineHook g_join_hook;
 InlineHook g_chat_hook;
+InlineHook g_left_hook;
+
+using PlayerLeftFn = void (*)(void* self, void* player, int sub_client_id);
+PlayerLeftFn g_left_original = nullptr;
 
 using TryToLoadFn = bool (*)(void* self, void* server_player, const void* connection_request, const void* auth_info);
 using DisconnectFn = void (*)(void* self, const void* network_id, uint8_t sub_client_id, int reason,
@@ -37,6 +44,7 @@ std::unordered_map<std::string, PlayerView> g_players_by_xuid;
 
 void set_local_player_initialized_detour(void* self, const void* network_id, const void* packet);
 void text_packet_detour(void* self, const void* network_id, const void* packet);
+void player_left_detour(void* self, void* player, int sub_client_id);
 
 std::string read_string_at(const void* base, size_t offset) {
     if (base == nullptr) {
@@ -65,6 +73,129 @@ PlayerView lookup_player(const std::string& xuid) {
         return {};
     }
     return it->second;
+}
+
+struct PendingJoin {
+    void* handle = nullptr;
+    PlayerView player;
+};
+
+std::mutex& pending_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::vector<PendingJoin>& pending_joins() {
+    static std::vector<PendingJoin> joins;
+    return joins;
+}
+
+void* g_level_tick_original = nullptr;
+bool g_level_hook_attempted = false;
+bool g_level_hook_installed = false;
+
+void level_tick_detour(void* level);
+
+void queue_join_watch(void* handle, const PlayerView& player) {
+    if (handle == nullptr) {
+        return;
+    }
+    std::lock_guard lock(pending_mutex());
+    auto& joins = pending_joins();
+    for (const auto& item : joins) {
+        if (item.handle == handle) {
+            return;
+        }
+    }
+    joins.push_back({handle, player});
+    log_write(LogLevel::Info, "join watch queued handle=%p", handle);
+}
+
+void install_level_tick_hook(void* actor) {
+    if (g_level_hook_installed || actor == nullptr) {
+        return;
+    }
+    const auto* version = state().profile;
+    if (version == nullptr || version->live.level_tick.rva == 0 || version->live.level_offset == 0) {
+        return;
+    }
+    void* level = *reinterpret_cast<void**>(static_cast<unsigned char*>(actor) + version->live.level_offset);
+    if (level == nullptr) {
+        return;
+    }
+    auto** vtable = *reinterpret_cast<void***>(level);
+    if (vtable == nullptr) {
+        return;
+    }
+    const auto target = state().module.base + version->live.level_tick.rva;
+    for (int slot = 0; slot < 2048; ++slot) {
+        if (reinterpret_cast<uintptr_t>(vtable[slot]) != target) {
+            continue;
+        }
+        const char* error = nullptr;
+        if (!install_vtable_hook(level, slot, reinterpret_cast<void*>(&level_tick_detour),
+                                 &g_level_tick_original, version->live.level_tick.bytes,
+                                 version->live.level_tick.length, &error)) {
+            log_write(LogLevel::Warn, "Level::tick vtable hook failed: %s", error ? error : "unknown");
+            return;
+        }
+        g_level_hook_installed = true;
+        log_write(LogLevel::Info, "Level::tick vtable hook installed slot=%d", slot);
+        return;
+    }
+    if (!g_level_hook_attempted) {
+        g_level_hook_attempted = true;
+        log_write(LogLevel::Warn, "Level::tick was not found in the Level vtable");
+    }
+}
+
+void level_tick_detour(void* level) {
+    using TickFn = void (*)(void*);
+    if (g_level_tick_original != nullptr) {
+        reinterpret_cast<TickFn>(g_level_tick_original)(level);
+    }
+
+    std::vector<PendingJoin> pending;
+    {
+        std::lock_guard lock(pending_mutex());
+        pending.swap(pending_joins());
+    }
+    if (pending.empty()) {
+        return;
+    }
+    const auto& offset = state().profile->live.join_flag_offset;
+    std::vector<PendingJoin> keep;
+    for (auto& item : pending) {
+        if (players_is_online(item.handle)) {
+            continue;
+        }
+        const auto flag = *(static_cast<volatile unsigned char*>(item.handle) + offset);
+        if (flag == 0) {
+            keep.push_back(std::move(item));
+            continue;
+        }
+        if (item.player.runtime_id == 0) {
+            item.player.runtime_id = live_runtime_id(item.handle);
+        }
+        if (auto joined = players_mark_joined(item.player.runtime_id); joined.has_value()) {
+            PlayerView view;
+            view.handle = joined->handle;
+            view.name = joined->name;
+            view.xuid = joined->xuid;
+            view.address = joined->address;
+            view.runtime_id = joined->runtime_id;
+            bool cancelled = false;
+            log_write(LogLevel::Info, "join watcher saw initialized handle=%p", item.handle);
+            emit_join(view, view.runtime_id, cancelled);
+        }
+    }
+    if (!keep.empty()) {
+        std::lock_guard lock(pending_mutex());
+        auto& joins = pending_joins();
+        for (auto& item : keep) {
+            joins.push_back(std::move(item));
+        }
+    }
 }
 
 void dump_vtable_if_requested(void* self) {
@@ -101,6 +232,8 @@ void dump_vtable_if_requested(void* self) {
 bool try_to_load_player_detour(void* self, void* server_player, const void* connection_request,
                                const void* auth_info) {
     dump_vtable_if_requested(self);
+    live_set_server_handler(self);
+
     PlayerView player;
     player.handle = server_player;
     player.name = read_string_at(auth_info, 9 * native_string_size(native_abi())); /* best_display_name */
@@ -108,15 +241,17 @@ bool try_to_load_player_detour(void* self, void* server_player, const void* conn
         player.name = read_string_at(auth_info, 6 * native_string_size(native_abi())); /* xbox_live_name */
     }
     player.xuid = read_string_at(auth_info, 0);
+    player.runtime_id = live_runtime_id(server_player);
     player.address.clear();
 
     remember_player(player);
-    players_upsert({player.name, player.xuid, player.address, player.runtime_id, player.handle, true});
+    players_upsert({player.name, player.xuid, player.address, player.runtime_id, player.handle, false});
 
     bool cancelled = false;
     emit_pre_join(player, cancelled);
     if (cancelled) {
         log_write(LogLevel::Warn, "pre_join cancelled for '%s'", player.name.c_str());
+        players_upsert({player.name, player.xuid, player.address, player.runtime_id, player.handle, false});
         return false;
     }
     if (g_try_original == nullptr) {
@@ -129,14 +264,47 @@ void disconnect_detour(void* self, const void* network_id, uint8_t sub_client_id
                        const void* filtered_message) {
     PlayerView player;
     player.address.clear();
+    bool known = false;
+    if (void* handle = live_take_player_for_network(network_id); handle != nullptr) {
+        known = players_is_online(handle);
+        player.handle = handle;
+        if (auto info = players_mark_offline(handle); info.has_value()) {
+            player.name = info->name;
+            player.xuid = info->xuid;
+            player.address = info->address;
+            player.runtime_id = info->runtime_id;
+            known = true;
+        }
+        live_forget_player(handle);
+    }
 
-    char reason_text[64];
-    std::snprintf(reason_text, sizeof(reason_text), "reason=%d", reason);
-    auto text = read_native_string(message, native_abi());
-    emit_left(player, text.empty() ? std::string_view(reason_text) : text);
+    if (known) {
+        char reason_text[64];
+        std::snprintf(reason_text, sizeof(reason_text), "reason=%d", reason);
+        auto text = read_native_string(message, native_abi());
+        emit_left(player, text.empty() ? std::string_view(reason_text) : text);
+    }
 
     if (g_disconnect_original != nullptr) {
         g_disconnect_original(self, network_id, sub_client_id, reason, message, filtered_message);
+    }
+}
+
+void player_left_detour(void* self, void* player, int sub_client_id) {
+    if (player != nullptr && players_is_online(player)) {
+        PlayerView view;
+        view.handle = player;
+        if (auto info = players_mark_offline(player); info.has_value()) {
+            view.name = info->name;
+            view.xuid = info->xuid;
+            view.address = info->address;
+            view.runtime_id = info->runtime_id;
+        }
+        live_forget_player(player);
+        emit_left(view, "left");
+    }
+    if (g_left_original != nullptr) {
+        g_left_original(self, player, sub_client_id);
     }
 }
 
@@ -147,9 +315,19 @@ void set_local_player_initialized_detour(void* self, const void* network_id, con
     }
     PlayerView player;
     player.runtime_id = player_id;
+    if (auto joined = players_mark_joined(player_id); joined.has_value()) {
+        player.handle = joined->handle;
+        player.name = joined->name;
+        player.xuid = joined->xuid;
+        player.address = joined->address;
+        player.runtime_id = joined->runtime_id != 0 ? joined->runtime_id : player_id;
+    }
+    if (player.handle != nullptr && network_id != nullptr) {
+        live_set_player_network_id(player.handle, network_id, 0);
+    }
     bool cancelled = false;
     emit_join(player, player_id, cancelled);
-    /* onJoin is informational in LLSE; never drop the original call. */
+    /* onJoin is informational; never drop the original call. */
     if (g_set_local_init_original != nullptr) {
         g_set_local_init_original(self, network_id, packet);
     }
@@ -259,6 +437,10 @@ bool install_one(InlineHook& hook, const char* name, const Prologue& spec, void*
 
 } // namespace
 
+void* disconnect_original_fn() {
+    return reinterpret_cast<void*>(g_disconnect_original);
+}
+
 bool install_player_hooks() {
     auto& rt = state();
     if (rt.profile == nullptr) {
@@ -280,6 +462,8 @@ bool install_player_hooks() {
                 reinterpret_cast<void**>(&g_set_local_init_original));
     install_one(g_chat_hook, "TextPacket", rt.profile->text_packet,
                 reinterpret_cast<void*>(&text_packet_detour), reinterpret_cast<void**>(&g_text_packet_original));
+    install_one(g_left_hook, "_onPlayerLeft", rt.profile->live.player_left,
+                reinterpret_cast<void*>(&player_left_detour), reinterpret_cast<void**>(&g_left_original));
     return true;
 }
 

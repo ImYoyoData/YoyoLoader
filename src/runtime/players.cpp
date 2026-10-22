@@ -49,6 +49,67 @@ std::vector<PlayerInfo> players_online() {
     return result;
 }
 
+std::optional<PlayerInfo> players_mark_joined(uint64_t runtime_id) {
+    std::lock_guard lock(g_mutex);
+    if (runtime_id != 0) {
+        for (auto& player : g_players) {
+            if (player.runtime_id == runtime_id) {
+                player.online = true;
+                return player;
+            }
+        }
+    }
+    /* The join packet in this BDS build only carries the runtime id.  When
+     * the component lookup succeeded in pre_join the exact match above is
+     * used; otherwise the newest pending player is the only safe guess. */
+    for (auto it = g_players.rbegin(); it != g_players.rend(); ++it) {
+        if (!it->online && it->handle != nullptr) {
+            if (runtime_id != 0) it->runtime_id = runtime_id;
+            it->online = true;
+            return *it;
+        }
+    }
+    return std::nullopt;
+}
+
+bool players_is_online(void* handle) {
+    std::lock_guard lock(g_mutex);
+    for (const auto& player : g_players) {
+        if (player.handle == handle && player.online) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::optional<PlayerInfo> players_find_by_handle(void* handle) {
+    std::lock_guard lock(g_mutex);
+    for (const auto& player : g_players) {
+        if (player.handle == handle) {
+            return player;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<PlayerInfo> players_mark_offline(void* handle) {
+    std::lock_guard lock(g_mutex);
+    for (auto& player : g_players) {
+        if (player.handle == handle) {
+            player.online = false;
+            return player;
+        }
+    }
+    return std::nullopt;
+}
+
+void players_mark_all_offline() {
+    std::lock_guard lock(g_mutex);
+    for (auto& player : g_players) {
+        player.online = false;
+    }
+}
+
 void players_clear() {
     std::lock_guard lock(g_mutex);
     g_players.clear();

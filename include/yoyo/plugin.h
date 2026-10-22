@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define YOYO_PLUGIN_ABI_VERSION 1u
+#define YOYO_PLUGIN_ABI_VERSION 2u
 
 #ifdef _WIN32
 #  define YOYO_EXPORT __declspec(dllexport)
@@ -91,6 +91,23 @@ typedef struct yoyo_api {
     /* Returns 0 on success. */
     int (*register_event)(int type, yoyo_event_callback callback, void *user);
     int (*unregister_event)(int type, yoyo_event_callback callback, void *user);
+
+    /*
+     * Live game bridge (ABI 2).  `player` is the opaque ServerPlayer handle
+     * delivered in yoyo_player_view.  All functions return 0 on success.
+     */
+    int (*player_send_message)(void *player, const char *message);
+    int (*server_broadcast)(const char *message);
+    int (*player_kick)(void *player, const char *reason);
+    int (*player_get_position)(void *player, double *x, double *y, double *z);
+    int (*player_teleport)(void *player, double x, double y, double z, int dimension);
+    int (*player_get_dimension)(void *player);
+    int (*player_send_title)(void *player, const char *title, const char *subtitle, int fade_in, int stay,
+                             int fade_out);
+    int (*player_send_actionbar)(void *player, const char *text);
+    int (*player_send_form)(void *player, const char *json);
+    int (*player_get_game_mode)(void *player);
+    int (*player_set_game_mode)(void *player, int mode);
 } yoyo_api;
 
 typedef const yoyo_api *(YOYO_CALL *yoyo_plugin_entry_fn)(const yoyo_api *api);

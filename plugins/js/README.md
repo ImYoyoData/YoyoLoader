@@ -8,43 +8,92 @@ under `<server>/plugins/` is evaluated at startup with a global `mc` object.
   yoyo.exe / yoyo
   yoyo_runtime.dll / libyoyo_runtime.so
   plugins/
-    sample.js
+    live_demo.js
+    title.js
 ```
 
 ## Events
 
 ```js
-mc.listen("onPreJoin", (player) => { /* return false or event.cancelled = true to reject */ });
+mc.listen("onPreJoin", (player, event) => {
+    // event.cancelled = true; // reject the login
+});
 mc.listen("onJoin", (player) => {});
 mc.listen("onChat", (player, message, event) => {
-    // event.cancelled = true;             // drop the chat packet
+    // event.cancelled = true;               // drop the chat packet
     // event.message = "[Title] " + message; // rewrite before BDS broadcasts it
 });
 mc.listen("onLeft", (player, reason) => {});
+mc.listen("onServerReady", (event) => {
+    // event.serverVersion, event.moduleBase
+});
 ```
 
 Aliases: `pre_join`, `join`, `chat`, `left`.
 
-`onChat` writes `event.message` back into the native TextPacket string in place.
-If the new text does not fit the existing native string capacity, the original
-message is kept and a warning is logged. `mc.__simulateChat(name, text)` and
-`mc.__rewriteNative(text)` are debug/self-test helpers for the same paths.
+`onLeft` is driven by `ServerNetworkHandler::_onPlayerLeft` and fires for normal
+quits, kicks and timeouts. `onChat` rewrites the native TextPacket string in
+place; if the new text does not fit, the original is kept.
 
-Only these four events are currently fired. `mc.listen` accepts other LLSE event
-names but logs a warning; they will never fire in this build.
+Other LLSE event names are accepted by `mc.listen` but only log a warning; they
+do not fire in this build.
 
 ## Player
 
 Properties: `name`, `xuid`, `address`, `runtimeId`, `isOnline`.
 
-Implemented: identity fields, `toString()`, `mc.getPlayer(nameOrXuid)`,
-`mc.getOnlinePlayers()`.
+```js
+// messages (real BDS packets)
+player.sendMessage("hello");
+player.sendTitle("title", "subtitle", 10, 70, 20);
+player.sendTip("tip");
+player.sendPopup("popup");
+player.sendSystemMessage("system");
+player.sendToast("title", "content");
+player.sendActionBar("actionbar");
+player.resetTitle();
 
-Not implemented (throws a descriptive `Error`): `sendMessage`, `kick`,
-`getPosition`, `getDimension`, `teleport`, `getNbt`.
+// geometry
+const pos = player.getPosition();   // { x, y, z } eye position
+const loc = player.getLocation();   // feet position + dimension + dimensionName + pitch + yaw
+const rot = player.getRotation();   // { pitch, yaw }
+player.teleport({ x: 100, y: 64, z: 100, dimension: 0 });
+player.getDimension();              // 0 overworld, 1 nether, 2 the_end
+player.getDimensionName();
 
-The registry is populated from `onPreJoin` / chat packets. `onJoin` currently has
-the runtime ID but not the player name, and `onLeft` has no player identity.
+// identity / state
+player.getRuntimeId();
+player.getUniqueId();               // raw ActorUniqueID (may be negative)
+player.getGameMode();               // 0 survival, 1 creative, 2 adventure, 6 spectator
+player.getGameModeName();
+player.setGameMode("creative");     // or a number
+
+// moderation
+player.kick("reason");
+```
+
+Aliases: `send_message`, `send_title`, `send_tip`, `send_popup`, `send_toast`,
+`send_actionbar`, `reset_title`, `get_position`, `get_location`,
+`get_dimension`, `get_game_mode`, `set_game_mode`.
+
+`teleport` currently supports same-dimension moves only; it returns `false` for
+cross-dimension requests. `getGameMode` prefers the live GameType component and
+falls back to the value set through `setGameMode` (default 0) if the component
+cannot be read.
+
+## Server / level helpers
+
+```js
+mc.getPlayer("Steve");
+mc.getOnlinePlayers();
+mc.getPlayers();
+mc.getOnlinePlayerCount();
+mc.broadcast("hello everyone");      // real TextPacket to all online players
+mc.getLevel();                       // lightweight level view
+mc.log("message");
+mc.getServerVersion();               // build id
+mc.getModuleBase();
+```
 
 ## NBT
 
@@ -59,30 +108,29 @@ nbt.keys();                        // ["name", "count", "nested"]
 nbt.setTag("child", new NBT());
 nbt.getTag("child");
 nbt.remove("name");
-nbt.toJSON();                      // object
-nbt.toString();                    // JSON string
-nbt.toBinaryHex();                 // Bedrock little-endian NBT bytes as hex
+nbt.toJSON();
+nbt.toString();
+nbt.toBinaryHex();
 NBT.parse(objectOrJsonString);
 NBT.parseBinary(hex);
 NBT.fromHex(hex);
-nbt.setByteArray(key, [1,2,3]);
-nbt.setIntArray(key, [1,2,3]);
-nbt.setLongArray(key, [1,2,3]);
+nbt.setByteArray(key, [1, 2, 3]);
+nbt.setIntArray(key, [1, 2, 3]);
+nbt.setLongArray(key, [1, 2, 3]);
 ```
 
 Type inference for `set`: boolean -> byte, integer -> int/long, other number ->
 double, string -> string, array -> list, object -> compound.
 
-## Forms (data model)
+## Forms
 
 ```js
 const form = mc.newSimpleForm("Title", "Content");
 form.addButton("OK", "textures/ui/check");
 form.setTitle("New title");
 form.setContent("New content");
-form.toString();      // JSON
-form.toJSON();        // object
-form.sendTo(player);  // throws: BDS form packet bridge not implemented yet
+form.sendTo(player);          // sends a real ModalFormRequestPacket
+player.sendForm(form);        // same thing
 
 const custom = mc.newCustomForm("Title");
 custom.addLabel("Label");
@@ -90,15 +138,19 @@ custom.addInput("Name", "placeholder", "default");
 custom.addToggle("Flag", true);
 custom.addDropdown("Pick", ["a", "b"], 0);
 custom.addSlider("Amount", 0, 10, 1, 5);
+custom.addStepSlider("Steps", ["a", "b", "c"], 0);
+custom.sendTo(player);
 
 const modal = mc.newModalForm("Title", "Content");
 modal.setConfirm("Yes");
 modal.setCancel("No");
+modal.sendTo(player);
 ```
 
 Global constructors `SimpleForm`, `CustomForm`, `ModalForm` are also available.
+Form **responses** are not connected to JS callbacks yet.
 
-## Item / Block / Container / Entity (data model)
+## Item / Block / Container / Entity (local data models)
 
 ```js
 const item = mc.newItem("minecraft:apple", 3, nbt);
@@ -121,25 +173,12 @@ const entity = mc.newEntity("Yoyo", { x: 0, y: 64, z: 0 }, 20);
 entity.getName(); entity.getHealth(); entity.setHealth(10); entity.getPos();
 ```
 
-These are **local data models**. `mc.getBlock`, `mc.getContainer`, `mc.getEntity`
-are not connected to the live world yet and throw a descriptive error.
-
-## Other `mc` functions
-
-| Function | Status |
-|---|---|
-| `mc.log(...)` | implemented |
-| `mc.listen(name, cb)` | implemented for the four events above |
-| `mc.getPlayer(nameOrXuid)` | implemented from the event registry |
-| `mc.getOnlinePlayers()` / `mc.getPlayers()` | implemented from the event registry |
-| `mc.getOnlinePlayerCount()` | implemented from the event registry |
-| `mc.getServerVersion()` | implemented (BDS build id) |
-| `mc.getModuleBase()` | implemented |
-| `mc.broadcast`, `mc.runcmd`, `mc.runcmdEx` | not implemented; throws |
-| `mc.getBlock`, `mc.getContainer`, `mc.getEntity` | not implemented; throws |
+These are **local data models**. `mc.getBlock`, `mc.getContainer` and
+`mc.getEntity` are not connected to the live world yet and throw a descriptive
+error. `mc.runcmd` and `mc.runcmdEx` are also not implemented.
 
 ## Threading
 
-Event callbacks run synchronously on the game/network thread that fired the
-event, under the JS engine mutex. Keep callbacks short; do not sleep or perform
-blocking I/O. A long callback blocks the server thread.
+Event callbacks run synchronously on the server/network thread that fired the
+event, under the JS engine mutex. Keep callbacks short; do not sleep, perform
+blocking I/O, or run long loops. The QuickJS memory limit is 64 MB.

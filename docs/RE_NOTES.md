@@ -99,7 +99,7 @@ RVA 0xF037CA8，offset_to_top = 0，共 107 槽
 1. 在 `.rodata` 找到 `20ServerNetworkHandler\0`；
 2. 通过 `.rela.dyn` 找到 typeinfo（name 指针 → typeinfo → 6 个引用它的 vtable）；
 3. offset_to_top 为 0 的那个是主 vtable；
-4. 槽位 104 的函数地址是 `0x8918B70`，与 Endstone 符号表中的 `_validateLoginPacket` 一致，说明“头文件声明顺序 + 1（析构函数占 2 槽）”的映射成立。
+4. 槽位 104 的函数地址是 `0x8918B70`，与 `_validateLoginPacket` 的已知位置一致，说明“头文件声明顺序 + 1（析构函数占 2 槽）”的映射成立。
 
 由此得到：
 
@@ -281,17 +281,35 @@ Windows 验证时，在 `version.cpp` 中填入两个 handler 的 RVA 和序言�
   - `ServerNetworkHandler::_onPlayerLeft`
   - `.../ServerNetworkHandler.cpp`
   - packet 名称、翻译 key 等。
-- Endstone 的 `scripts/configs/*.toml` 提供了 82 个符号的字节签名和推导注释，可以直接复用或作为模板；`scripts/dump_symbols.py` 会按签名在新二进制中重新扫描。
 - 找到函数后，记录：
   - 文件 RVA；
   - 前 14–27 字节序言，必须结束在完整指令边界；
   - 是否包含 RIP-relative 或 rel8/rel32 跳转（如果有，固定序言复制法不适用，需要换通用 detour 引擎）。
 
-## 8. 已知未完成项
+## 8. 实时桥接（1.26.52.3）
 
-- Windows join（`0x980970`）与 chat（`0x973B30`）已定位并接入；join 已实机验证，chat 已用 Ghidra 确认语义但 bot 的聊天包被 BDS 丢弃。
-- Linux join（`0x8911320`）与 chat（`0x8905AD0`）已接入；join 已实机验证，chat 同样需要真实客户端确认。
-- `onLeft` 目前只覆盖 `disconnectClientWithMessage`（踢人/超时）；正常退出还没有走这个函数。
-- join/left 的 `ServerPlayer*` 还没有解析；join 包只有 ActorRuntimeID，left 只有 NetworkIdentifier。
-- `pre_join` 的 IP 字段为空。
-- JS host 尚未实现。
+| 入口 | Linux | Windows |
+|---|---|---|
+| `MinecraftPackets::createPacket` | `0x89FB260` | `0x93A490` |
+| `Player::sendNetworkPacket` | vtable `0x728` | vtable `0x720` |
+| `Actor::teleportTo` | vtable `0xB0` | vtable `0xA8` |
+| `Player::setPlayerGameType` | vtable `0x698` | vtable `0x690` |
+| `Dimension::getDimensionId` | vtable `0x18` | vtable `0x10` |
+| `_onPlayerLeft` | `0x89143F0` | `0x983800` |
+
+对象布局：
+
+- `Actor::built_in_components_`：Linux `+0x208`（state）/`+0x218`（rotation），
+  Windows `+0x218`/`+0x228`。
+- `Actor::dimension_`：Linux `+0x1C0`，Windows `+0x1C8`。
+- EnTT 组件在 dense page 中按值存放，组件指针 = `dense_page + index * size`。
+  `RuntimeIDComponent`、`ActorUniqueIDComponent` 的大小均为 8。
+- `NetworkIdentifier` 176 字节；join handler 的第二个参数可以直接复制。
+
+## 9. 已知未完成项
+
+- `onChat` 的真实客户端链路仍需确认；测试 bot 的 TextPacket 在 BDS 聊天处理前被丢弃。
+- 表单响应回调、跨维度传送、生命值/背包/权限/飞行、Scoreboard、命令执行、
+  实时 Block/Item/Container/Entity 尚未接入。
+- `pre_join` 的 IP 字段为空；`PlayerAuthenticationInfo` 不含客户端地址。
+- `getUniqueId` 返回原始 `ActorUniqueID`，当前版本可能表现为负数。

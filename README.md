@@ -1,58 +1,44 @@
 # YoyoLoader
 
-YoyoLoader 是一个面向 **Minecraft Bedrock Dedicated Server** 的 C++20 注入式 mod loader。它不修改原版 `bedrock_server`，而是在当前目录启动一个名为 `yoyo` 的启动器，把 `yoyo_runtime` 注入进去，然后通过逆向得到的 RVA 和函数序言挂接玩家事件。
+YoyoLoader 是面向 **Minecraft Bedrock Dedicated Server 1.26.52.3** 的 C++20 注入式 mod loader。
+它不修改原版 `bedrock_server`，而是用一个名为 `yoyo` 的启动器把 `yoyo_runtime` 注入进程，
+再通过逆向得到的 RVA、vtable 槽位和对象布局提供事件与实时 API。
 
-命名沿用你的名字：项目 **YoyoLoader**，启动器 `yoyo`，运行时 `yoyo_runtime.dll` / `libyoyo_runtime.so`，C++ 命名空间 `yoyo`。
+- 启动器：`yoyo.exe` / `yoyo`
+- 运行时：`yoyo_runtime.dll` / `libyoyo_runtime.so`
+- 命名空间：`yoyo`
+- 插件：C++ / Go（C ABI）、JavaScript（内嵌 QuickJS-ng）
 
-## 1. 为什么新建 `yoyo`，而不是改 `bedrock_server`
+## 1. 设计选择
 
-推荐 **不修改** 原版二进制：
+不修改原版二进制：
 
-- 不需要像 LeviLamina 的 PeEditor 那样给 exe 打补丁，BDS 更新后不会留下一个坏掉的旧 exe。
-- Windows 用“挂起进程 + 注入 DLL”，Linux 用 `LD_PRELOAD`，两端逻辑一致。
-- 原版 `bedrock_server` 保持只读，下载/校验/回滚都简单。
+- Windows：挂起方式创建 `bedrock_server.exe`，远程 `LoadLibraryW` 注入，再恢复主线程。
+- Linux：设置 `LD_PRELOAD` 后 `execv` 原版 `bedrock_server`。
+- 原版 `bedrock_server` 保持只读，下载、校验、回滚都简单。
+- 未知 build id 或函数序言不匹配时拒绝 patch，不会盲打。
 
-如果你想要 drop-in 的名字，直接复制启动器即可：
+启动器优先在当前目录查找 `bedrock_server(.exe)`，找不到再回退到自身所在目录。
+runtime、`plugins/` 和服务器放在同一目录。需要 drop-in 名字时直接复制启动器即可：
 
 ```text
 Windows:  copy yoyo.exe bedrock_server_mod.exe
 Linux:    cp yoyo bedrock_server_mod
 ```
 
-启动器优先在当前目录查找 `bedrock_server(.exe)`，找不到再回退到自身所在目录；runtime 和 `plugins/` 与服务器放在同一目录。改名不影响。
-
 ## 2. 已验证环境
 
-| 平台 | BDS | Build ID | 状态 |
+| 平台 | BDS | Build ID | 实测内容 |
 |---|---|---|---|
-| Windows x64 | 1.26.52.3 | `d9f9837c2108f3824c4c44205044422e1` | 注入、inline hook、插件加载、服务器启动均已实测 |
-| Linux x64 | 1.26.52.3 | `c0ff36e2eacfc191f01e189237df71f139b5d04a` | 注入、inline hook、插件加载、服务器启动均已实测（Docker + clang 20） |
+| Windows x64 | 1.26.52.3 | `d9f9837c2108f3824c4c44205044422e1` | 注入、事件、消息/标题/Toast/表单、位置/维度、传送、踢人、正常退出事件、C++/JS 插件 |
+| Linux x64 | 1.26.52.3 | `c0ff36e2eacfc191f01e189237df71f139b5d04a` | 注入、事件、消息/标题/Toast/表单、位置/维度、传送、踢人、正常退出事件、JS 插件 |
 
-> 只支持 x86-64；不支持 ARM。
+测试使用 NetherNet 传输的离线 bot（Windows 与 Linux 均在 Docker 中）连接真实 BDS。
+Linux runtime 在 Debian/glibc 2.36 + clang 20 下构建并加载；建议使用 LLD 链接。
 
-## 2.5 Live API 后端：Endstone
+> 仅支持 x86-64。Windows 需要 MSVC 2022；Linux 需要 clang++ 20 或更新版本。
 
-为了提供**完整的实时 API**（Player / Block / Item / Container / Entity / Forms / Scoreboard），项目附带 Endstone 后端。Endstone 是 Apache-2.0，支持 BDS 1.26.52 的 Windows/Linux，已经有成熟的 fake headers 和逐版本符号表。
-
-```bash
-python scripts/setup_endstone_backend.py \
-    --server endstone_server \
-    --bds-zip /path/to/bedrock-server-1.26.52.3-win.zip \
-    --run
-```
-
-自带的两个 Endstone 插件：
-
-- `yoyo_title`：监听 `PlayerChatEvent`，修改 `event.message` 后放出（称号插件）。
-- `yoyo_sidebar`：真实 scoreboard 侧边栏，每秒刷新 TPS / 游戏时间 / 玩家 / 实体 / 掉落物。
-
-插件源码在 [endstone_plugins](endstone_plugins)，预构建 wheel 在 `dist/endstone/`，完整安装/测试记录见 [docs/ENDSTONE_BACKEND.md](docs/ENDSTONE_BACKEND.md)。
-
-> YoyoLoader 原生 runtime 与 Endstone 是两种后端，**不要同时注入同一个 bedrock_server 进程**：
-> - 需要完整 live API：用 Endstone 后端；
-> - 需要自定义注入、JS/C++/Go 事件插件、NBT/表单数据模型：用 YoyoLoader 原生 runtime。
-
-## 3. 快速开始
+## 3. 构建与运行
 
 ### Windows
 
@@ -60,21 +46,17 @@ python scripts/setup_endstone_backend.py \
 scripts\build_windows.bat
 ```
 
-把下面这些文件放到 BDS 目录（和 `bedrock_server.exe` 同级）：
+部署到 BDS 目录：
 
 ```text
+bedrock_server.exe
 yoyo.exe
 yoyo_runtime.dll
 plugins\sample_cpp.dll
+plugins\live_demo.js
 ```
 
-运行：
-
-```bat
-yoyo.exe
-```
-
-启动器会以挂起方式创建 `bedrock_server.exe`，注入 `yoyo_runtime.dll`，等 `DllMain` 完成 hook 安装后再恢复主线程。日志写入同目录 `yoyo.log`。
+运行 `yoyo.exe`。日志写入同目录 `yoyo.log`。
 
 ### Linux
 
@@ -82,21 +64,18 @@ yoyo.exe
 bash scripts/build_linux.sh
 ```
 
-把下面这些文件放到 BDS 目录（和 `bedrock_server` 同级）：
+部署：
 
 ```text
+bedrock_server
 yoyo
 libyoyo_runtime.so
 plugins/sample_cpp.so
+plugins/live_demo.js
 ```
 
-运行：
-
-```bash
-./yoyo
-```
-
-启动器会设置 `LD_PRELOAD=<绝对路径>/libyoyo_runtime.so` 并 `execv` 原版 `bedrock_server`。日志同样在 `yoyo.log`。
+运行 `./yoyo`。脚本默认静态链接 libstdc++；如果目标机使用不同的 glibc，
+可用 `YOYO_STATIC=0 bash scripts/build_linux.sh` 生成动态链接版本。
 
 ### CMake（可选）
 
@@ -105,200 +84,228 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-多配置生成器（Visual Studio）的可执行文件通常在 `build/bin/Release`。
-
 ## 4. 事件
 
-| 事件 | 触发点 | 可取消 | 当前可用性 |
+| 事件 | 触发点 | 可取消 | 状态 |
 |---|---|---|---|
-| `YOYO_EVENT_PRE_JOIN` | `ServerNetworkHandler::tryToLoadPlayer` | 是（返回 false 拒绝登录） | Win / Linux |
-| `YOYO_EVENT_JOIN` | `ServerNetworkHandler` 的 `SetLocalPlayerAsInitializedPacket` handler | 否 | Linux / Windows 均已实机验证 |
-| `YOYO_EVENT_CHAT` | `ServerNetworkHandler` 的 `TextPacket` handler | 是（不调用原函数即丢弃） | Linux / Windows 均已安装；测试 bot 的聊天包被 BDS 丢弃，需真实客户端确认 |
-| `YOYO_EVENT_LEFT` | `ServerNetworkHandler::disconnectClientWithMessage` | 否 | Win / Linux |
-| `YOYO_EVENT_SERVER_READY` | 插件加载完成后 | 否 | Win / Linux |
+| `onPreJoin` | `ServerNetworkHandler::tryToLoadPlayer` | 是 | Windows / Linux 实测 |
+| `onJoin` | `SetLocalPlayerAsInitialized` 处理函数 | 否 | Windows / Linux 实测 |
+| `onChat` | `TextPacket` 处理函数 | 是 | 已安装并支持 `event.message`；测试 bot 的聊天包被 BDS 丢弃，需真实客户端确认 |
+| `onLeft` | `ServerNetworkHandler::_onPlayerLeft` | 否 | Windows / Linux 实测，覆盖正常退出、踢人和超时 |
+| `onLeft`（兼容路径） | `disconnectClientWithMessage` | 否 | 与上一个事件去重 |
+| `onServerReady` | 插件加载完成后 | 否 | 两端实测 |
 
-### 1.26.52.3 的 RVA
+`onChat` 会原地修改原生 `TextPacket` 的字符串；如果新消息超过原字符串容量，
+会保留原消息并写警告日志。不要依赖“取消后还能继续发包”的语义。
+
+### 1.26.52.3 的 Hook RVA
 
 | Hook | Linux RVA | Windows RVA | 序言长度 |
 |---|---|---|---|
 | `tryToLoadPlayer` | `0x892CD70` | `0x9A0690` | 14 / 19 |
 | `disconnectClientWithMessage` | `0x8904FE0` | `0x972F40` | 17 / 19 |
-| `SetLocalPlayerAsInitialized` handler | `0x8911320` | `0x980970` | 24 / 28 |
-| `TextPacket` handler | `0x8905AD0` | `0x973B30` | 27 / 27 |
+| `SetLocalPlayerAsInitialized` | `0x8911320` | `0x980970` | 24 / 28 |
+| `TextPacket` | `0x8905AD0` | `0x973B30` | 27 / 27 |
+| `_onPlayerLeft` | `0x89143F0` | `0x983800` | 22 / 27 |
 
-Linux 的 `ServerNetworkHandler` 主 vtable 位于 RVA `0xF037CA8`，共 107 槽；槽位 104 对应 `_validateLoginPacket`，用来校验“声明顺序 → 槽位”的映射。槽位 68 / 79 指向上面两个 handler，但服务器是**直接调用**它们（devirtualized），改 vtable 槽位不会生效，所以最终 hook 的是函数自身的序言。
+序言在 patch 前逐字节校验。`Level::tick` 的 vtable 钩子代码保留在 runtime 中，
+但当前版本没有用它处理事件；所有事件都走上面的定点 hook。
 
-Windows 的主 vtable 位于 RVA `0xA716310`。槽位 3 是 `_validateLoginPacket`（`0x989140`），槽位 90 是 join handler（`0x980970`），槽位 242 是 chat handler（`0x973B30`）。这两个 handler 已用 Ghidra 定点反编译确认：
+## 5. 实时 API（YoyoLoader 原生）
 
-- `FUN_140980970`：调用 `_getServerPlayer` 后写入 `player+0xdb7 = 1`；
-- `FUN_140973b30`：调用 `_getServerPlayer`、处理字符串，并调用聊天 helper `FUN_140970de0` 与 `disconnectClientWithMessage`。
+实时桥接不依赖任何第三方符号文件、PDB 或 DWARF。使用的关键 BDS 入口：
 
-Windows 的 join 已用离线 bot 实测触发；chat hook 安装成功，但 bot 发出的 TextPacket 被 BDS 丢弃，仍需真实客户端确认一次。
+| 功能 | Linux RVA | Windows RVA |
+|---|---|---|
+| `MinecraftPackets::createPacket` | `0x89FB260` | `0x93A490` |
+| `Player::sendNetworkPacket` | vtable `0x728` | vtable `0x720` |
+| `Actor::teleportTo` | vtable `0xB0` | vtable `0xA8` |
+| `Player::setPlayerGameType` | vtable `0x698` | vtable `0x690` |
+| `Dimension::getDimensionId` | vtable `0x18` | vtable `0x10` |
 
-## 5. 插件 ABI
+对象访问：
 
-插件是普通 DLL / SO，必须导出：
+- 位置/朝向：`Actor` 的 `built_in_components_` 指针（Linux `+0x208`/`+0x218`，Windows `+0x218`/`+0x228`）。
+- 维度：`Actor::dimension_`（Linux `+0x1C0`，Windows `+0x1C8`），虚拟 `getDimensionId`。
+- 玩家标识：`RuntimeIDComponent` / `ActorUniqueIDComponent` 通过 EntityContext 的 EnTT 组件表读取。
+- 踢人：从 join 处理函数保存 176 字节 `NetworkIdentifier`，调用 `disconnectClientWithMessage` 的 trampoline。
+- 正常退出：`_onPlayerLeft` 直接提供 `Player*`，因此不需要再猜网络 ID。
 
-```cpp
-extern "C" __declspec(dllexport)
-const yoyo_api* __cdecl yoyo_plugin_entry(const yoyo_api* api);
+### 已实现的 JS 实时 API
+
+```js
+// 消息
+player.sendMessage("hello");
+player.sendTitle("title", "subtitle", 10, 70, 20);
+player.sendTip("tip");
+player.sendPopup("popup");
+player.sendSystemMessage("system");
+player.sendToast("title", "content");
+player.sendActionBar("actionbar");
+player.resetTitle();
+
+// 位置 / 维度 / 朝向
+const pos = player.getPosition();       // { x, y, z }
+const loc = player.getLocation();       // 脚部位置 + dimension + rotation
+const rot = player.getRotation();       // { pitch, yaw }
+player.teleport({ x, y, z, dimension: 0 });
+player.getDimension();                  // 0 overworld, 1 nether, 2 the_end
+player.getDimensionName();
+
+// 身份 / 状态
+player.getRuntimeId();
+player.getUniqueId();                   // 原始 ActorUniqueID，可能为负值
+player.getGameMode();                   // 0 survival, 1 creative, 2 adventure, 6 spectator
+player.getGameModeName();
+player.setGameMode("creative");         // 也接受数字
+
+// 管理
+player.kick("reason");
+mc.getOnlinePlayers();
+mc.getOnlinePlayerCount();
+mc.broadcast("hello everyone");
+
+// 表单（真实下发）
+const form = mc.newSimpleForm("Title", "Content");
+form.addButton("OK");
+form.sendTo(player);
 ```
 
-Linux 用 `YOYO_EXPORT`（默认可见性）即可。完整定义见 [include/yoyo/plugin.h](include/yoyo/plugin.h)。
+别名：`send_message`、`send_title`、`send_tip`、`send_popup`、`send_toast`、
+`send_actionbar`、`reset_title`、`get_position`、`get_location`、`get_dimension`、
+`get_game_mode`、`set_game_mode`、`send_form`。
 
-设计原则：
+实时行为：
 
-- 只暴露 C 结构体、C 函数指针和 `const char*`，不暴露任何 STL / Bedrock 类型。
-- 事件中的字符串只在回调期间有效，插件需要保存时自行拷贝。
-- `player.handle` 是不透明的 `ServerPlayer*`，只能用于比较身份，不能解引用。
-- 回调在游戏线程上执行，不要做长时间阻塞操作。
+- 消息/标题/Toast/表单使用 `MinecraftPackets::createPacket` 创建真实 BDS Packet，
+  再通过 `Player::sendNetworkPacket` 发送；不是伪造的本地回调。
+- 弹窗使用 `MessageAndParams` variant，客户端会收到 `parameters: []` 的 Popup。
+- `teleport` 仅支持同维度；跨维度会返回 `false` 并记录警告。
+- `getGameMode` 优先读 GameType 组件；读不到时使用 `setGameMode` 缓存/默认 0。
+- 正常退出后玩家会从 `getOnlinePlayers()` 移除。
 
-### C++ 示例
+#### 尚未接入的实时 API
 
-见 [plugins/sample_cpp/plugin.cpp](plugins/sample_cpp/plugin.cpp)。构建脚本会生成 `plugins/sample_cpp.dll` / `sample_cpp.so`。
+以下接口仍会抛出带说明的错误，或只返回本地数据模型：
 
-### Go 示例
+- `mc.getBlock` / `mc.getContainer` / `mc.getEntity`
+- 实时 Block/Item/Container/Entity/Inventory 读写
+- Scoreboard、BossBar、Map、Boss Event、命令执行（`mc.runcmd` / `mc.runcmdEx`）
+- 表单响应回调（客户端提交后回传 JS callback）
+- 玩家生命值、饥饿、经验、飞行、权限、皮肤、Ping、跨维度传送
+- 世界时间/天气、Level/Dimension 实时对象
 
-见 [plugins/go_sample](plugins/go_sample)。使用 cgo 的 `-buildmode=c-shared`：
+Item/Block/Container/Entity 的 `mc.newItem` / `mc.newBlock` / `mc.newContainer` /
+`mc.newEntity` 仍是本地数据模型，适合构造参数或测试；不能修改真实世界。
+
+## 6. 插件 ABI
+
+插件必须导出：
+
+```cpp
+extern "C" YOYO_EXPORT
+const yoyo_api* YOYO_CALL yoyo_plugin_entry(const yoyo_api* api);
+```
+
+完整定义见 [include/yoyo/plugin.h](include/yoyo/plugin.h)。ABI 版本 2 在事件之外增加了：
+
+```c
+int (*player_send_message)(void *player, const char *message);
+int (*server_broadcast)(const char *message);
+int (*player_kick)(void *player, const char *reason);
+int (*player_get_position)(void *player, double *x, double *y, double *z);
+int (*player_teleport)(void *player, double x, double y, double z, int dimension);
+int (*player_get_dimension)(void *player);
+int (*player_send_title)(void *player, const char *title, const char *subtitle,
+                         int fade_in, int stay, int fade_out);
+int (*player_send_actionbar)(void *player, const char *text);
+int (*player_send_form)(void *player, const char *json);
+int (*player_get_game_mode)(void *player);
+int (*player_set_game_mode)(void *player, int mode);
+```
+
+### C++
+
+[plugins/sample_cpp/plugin.cpp](plugins/sample_cpp/plugin.cpp) 在 `onJoin` 中
+发送消息并读取位置/维度。构建脚本会输出 `sample_cpp.dll` / `sample_cpp.so`。
+
+### Go
+
+[plugins/go_sample](plugins/go_sample) 使用 cgo `-buildmode=c-shared`：
 
 ```bash
-# Linux
+# Linux（需要 gcc 与 Go）
 cd plugins/go_sample
 CGO_ENABLED=1 go build -buildmode=c-shared -o ../../build-linux/bin/plugins/sample_go.so .
 
-# Windows（需要 MinGW-w64 的 gcc；MSVC 不能直接用于 cgo）
+# Windows（需要 MinGW-w64 的 gcc；MSVC 不能用于 cgo）
 go build -buildmode=c-shared -o sample_go.dll .
 ```
 
-`callback.c` 中的 C trampoline 负责把 C 函数指针转给 Go 的 `//export` 函数。
+`callback.c` 的 trampoline 把 C 回调转给 Go 的 `//export` 函数，并在 join 时调用
+`player_send_message`。Go 侧检查 ABI 版本 2。
 
-> C++ / Go 插件目前通过 C ABI 接收事件和玩家身份信息；NBT、表单、Item/Block/Container/Entity 等高层 API 目前只在 JS 层提供。
+### JavaScript
 
-### JS 示例
-
-runtime 已内嵌 **QuickJS-ng 0.17.0**（MIT，源码在 `third_party/quickjs`）。把 `.js` 文件放到 `<server>/plugins/` 即可加载；示例见 [plugins/sample.js](plugins/sample.js)，完整 API 见 [plugins/js/README.md](plugins/js/README.md)。
-
-```js
-mc.log("plugin loaded");
-
-mc.listen("onPreJoin", (player) => mc.log("pre_join", player.name, player.xuid));
-mc.listen("onJoin", (player) => mc.log("join", player.runtimeId));
-mc.listen("onChat", (player, message, event) => {
-    mc.log("chat", player.name, message);
-    // event.cancelled = true;
-});
-mc.listen("onLeft", (player, reason) => mc.log("left", reason));
-
-const nbt = new NBT();
-nbt.set("name", "Yoyo");
-nbt.set("nested", { values: [1, 2, 3] });
-mc.log(nbt.toString());
-
-const form = mc.newSimpleForm("Title", "Content");
-form.addButton("OK");
-mc.log(form.toString());
-```
-
-### API 兼容矩阵
-
-| 功能 | 状态 |
-|---|---|
-| `onPreJoin` / `onJoin` / `onChat` / `onLeft` | 实现（两端均实测） |
-| 其他 LLSE 事件 | 未实现；`mc.listen` 会警告，不会触发 |
-| 玩家 name / xuid / address / runtimeId、`mc.getPlayer`、`mc.getOnlinePlayers` | 实现（基于事件注册表） |
-| `player.sendMessage` / `kick` / `teleport` / `getPosition` / `getDimension` | 未实现，明确抛错 |
-| NBT：get/set/getTag/setTag/keys/getType/toJSON/toString/二进制 hex | 实现 |
-| 表单数据模型：SimpleForm / CustomForm / ModalForm、按钮/输入/下拉/滑条、toJSON | 实现 |
-| `form.sendTo` | 未实现，明确抛错（BDS form packet bridge 尚未接入） |
-| Item / Block / Container / Entity 数据模型 | 实现（本地数据，不连接实时世界） |
-| `mc.getBlock` / `mc.getContainer` / `mc.getEntity` | 未实现，明确抛错 |
-| `mc.log` / `mc.getServerVersion` / `mc.getModuleBase` | 实现 |
-| `mc.broadcast` / `mc.runcmd` / `mc.runcmdEx` | 未实现，明确抛错 |
-| C++ / Go 插件事件 ABI | 保持兼容 |
-
-> 上表描述的是 YoyoLoader **原生 JS API**。完整的实时 Player / Block / Item / Container / Entity / Forms / Scoreboard 请使用 **Endstone 后端**（见 2.5 节和 [docs/ENDSTONE_BACKEND.md](docs/ENDSTONE_BACKEND.md)）。原生 API 未实现的部分仍会抛出带说明的错误，不会返回伪造数据。详细审计见 [docs/API_COVERAGE.md](docs/API_COVERAGE.md)。
-
-### 自带测试插件
-
-**Endstone 后端插件**（完整 live API）：
-
-- [endstone_plugins/yoyo_title](endstone_plugins/yoyo_title)：`PlayerChatEvent` 修改聊天内容，wheel 已构建。
-- [endstone_plugins/yoyo_sidebar](endstone_plugins/yoyo_sidebar)：真实 `SIDE_BAR` scoreboard，TPS/时间/玩家/实体/掉落物每秒刷新。
-- 一键安装见 2.5 节或 [docs/ENDSTONE_BACKEND.md](docs/ENDSTONE_BACKEND.md)。
-
-**YoyoLoader 原生称号插件**：[plugins/title.js](plugins/title.js)。复制到 `<server>/plugins/title.js`，编辑 `TITLES` 表；它在 `onChat` 里设置 `event.message`，runtime 会把新消息写回原生 TextPacket，再交给 BDS 广播。
+运行时内嵌 **QuickJS-ng 0.17.0**（MIT，`third_party/quickjs`）。把 `.js` 放到
+`<server>/plugins/` 即可。示例见 [plugins/live_demo.js](plugins/live_demo.js)
+和 [plugins/title.js](plugins/title.js)，API 细节见 [plugins/js/README.md](plugins/js/README.md)。
 
 ```js
-const TITLES = { "YoyoTest": "[管理员]" };
-mc.listen("onChat", (player, message, event) => {
-    const title = TITLES[player.name] || "[玩家]";
-    event.message = title + " " + message;
+mc.listen("onJoin", (player) => {
+    player.sendMessage("§a欢迎 " + player.name);
+    player.sendTitle("§eYoyoLoader", "§bLive API", 10, 70, 20);
+    const form = mc.newSimpleForm("测试", "选择一个操作");
+    form.addButton("好的");
+    form.sendTo(player);
 });
 ```
 
-插件加载时会执行 `mc.__simulateChat` 和 `mc.__rewriteNative` 自测，Windows/Linux 日志分别为 `[管理员] hello world`、`short=ok long=ok`。真实聊天链路仍需要真实客户端验证：测试 bot 发出的 TextPacket 在到达 handler 前就被 BDS 丢弃。
+## 7. 技术原理
 
-**YoyoLoader 原生侧边栏（行为包）**：[plugins/sidebar_pack](plugins/sidebar_pack)。它是 BDS 原生行为包（`@minecraft/server`），每秒更新侧边栏：
+1. **版本识别**：Windows 读 PE CodeView/RSDS；Linux 读 ELF `PT_NOTE` 的 GNU build-id。
+   不使用 PDB/DWARF/符号文件。
+2. **版本表**：`src/runtime/version.cpp` 保存 build id、RVA、函数序言和 vtable 槽位。
+   未知 build 不安装 hook。
+3. **inline hook**：复制完整指令边界的序言到 trampoline，写入 14 字节绝对跳转
+   `FF 25 ... + abs64`。序言必须结束在指令边界，且不能包含 RIP-relative 指令。
+4. **vtable hook**：对数据/虚函数路径使用只改槽位的 hook，避免复制序言；
+   `Level::tick`、`sendNetworkPacket`、`teleportTo` 等不需要 inline trampoline。
+5. **跨 STL 边界不传递 STL 对象**：runtime 自己编译，但读写 BDS 的 `std::string`
+   时按 ABI 手工构造/解析：
+   - MSVC：32 字节，size `+16`，capacity `+24`，短数据 `+0`，长指针 `+0`；
+   - libc++ LLVM 20：24 字节，短字符串 `byte0 = size << 1`、数据 `+1`；长字符串
+     size `+8`、指针 `+16`、capacity 字段 `+0`（低位为长标志）。
+6. **Packet 布局**：`Packet` 基类 48 字节；`TextPacketPayload.body` 在 MSVC 下
+   `+112`、libc++ 下 `+88`。Popup 使用 `std::variant` 的第三个 alternative
+   （MessageAndParams），索引分别位于 body `+72` / `+56`。
+7. **EnTT 组件**：EntityContext 的组件在 dense page 中按值存放，组件指针是
+   `page + index * component_size`，不是从 page 里再读一个指针。
 
-```bash
-python scripts/install_sidebar.py --server /path/to/bedrock-server
-```
+更细致的逆向记录见 [docs/RE_NOTES.md](docs/RE_NOTES.md)。
 
-显示内容：
+## 8. 测试与已知限制
 
-```text
-YoyoLoader
-  TPS       20
-  TIME      630     # 游戏时间 HHMM
-  PLAYERS   1
-  ENTITIES  3
-  ITEMS     0
-```
+- 测试使用 NetherNet + 离线 bot，Windows 和 Linux 都连接真实 BDS 1.26.52.3。
+- Windows/Linux 的 join、消息、标题、Tip、Popup、Toast、Actionbar、表单、
+  位置/维度、传送、踢人、正常退出均实测通过。
+- `onChat` 的 bot 聊天包会在到达 handler 前被 BDS 丢弃；handler 和字符串重写
+  已用 `mc.__simulateChat` / `mc.__rewriteNative` 自测，仍需真实客户端确认一次。
+- 表单只支持下发；客户端提交的响应尚未回调到 JS。
+- 跨维度传送、生命值/背包/权限/飞行、Scoreboard、命令执行、实时方块/容器/实体
+  尚未接入。
+- `getUniqueId` 返回 BDS 原始 `ActorUniqueID`，在当前版本可能表现为负数；
+  需要稳定正数 ID 时请使用 `getRuntimeId`。
+- `pre_join` 的 `address` 目前为空；`PlayerAuthenticationInfo` 不含客户端地址。
+- JS 回调在触发事件的服务器/网络线程同步执行并持有引擎锁；不要 sleep、做长 I/O
+  或长循环。QuickJS 内存上限 64 MB。
+- 强制 trace / 反作弊软件可能阻止远程线程或 `LD_PRELOAD`；本项目不对抗这类检测。
+- BDS 的 EULA/许可对逆向和再分发有限制。请只分发 YoyoLoader 自身，不要重新分发
+  修改后的 `bedrock_server`。
 
-已在 Windows/Linux BDS 1.26.52.3 实测；Windows 下连接 bot 后日志为 `players=1 entities=3`。安装脚本会把行为包复制到 `behavior_packs/yoyo_sidebar` 并加入 `world_behavior_packs.json`。
+## 9. 第三方
 
-## 6. 实现原理（不依赖符号文件）
-
-1. **识别版本**：Windows 从 PE 的 CodeView/RSDS 读取 GUID + age；Linux 从 ELF `PT_NOTE` 读取 GNU build-id。没有符号文件、没有 PDB、没有 DWARF。
-2. **版本表**：`src/runtime/version.cpp` 中按 build id 保存 RVA 和函数序言。未知 build 直接拒绝安装 hook，避免错位 patch。
-3. **inline hook**：把目标函数前 N 字节的固定序言复制到 trampoline，再写入 `FF 25 ... + abs64` 绝对跳转。序言在 patch 前逐字节校验；不使用反汇编器，因此没有 Capstone/Zydis 依赖。
-4. **handler inline hook**：`SetLocalPlayerAsInitialized` 和 `TextPacket` 的 handler 直接按 RVA 做 inline hook；vtable 只用于逆向阶段定位函数，不参与最终 patch。
-5. **跨 STL 边界不传递 C++ 对象**：runtime 自己可以用任意 stdlib 编译；读取 BDS 的 `std::string` 时按 ABI 手工解析：
-   - MSVC：32 字节，size @ +16，capacity @ +24，短字符串数据 @ +0，长字符串指针 @ +0；
-   - libc++（LLVM 20）：24 字节，短字符串 size = byte0 >> 1、数据 @ +1；长字符串 size @ +8、指针 @ +16。
-6. **聊天/组包布局**：`Packet` 基类 48 字节；`TextPacketPayload.body` 在 MSVC 下位于 payload + 112，在 libc++ 下位于 payload + 88；`AuthorAndMessage` 的 author @ body+8，message @ body+8+string_size。两套布局都用本地测试程序验证过。
-
-更详细的逆向记录见 [docs/RE_NOTES.md](docs/RE_NOTES.md)。
-
-## 7. 版本升级流程
-
-BDS 小版本更新后，RVA 会变，但 build id 也会变。流程：
-
-1. 把新 `bedrock_server` 放进独立目录，运行一次 `yoyo`，`yoyo.log` 会打印新的 build id 并拒绝加载。
-2. 用 REA（Ghidra/IDA 的 MCP 服务）或直接 Ghidra 定位四个目标：
-   - Linux 可以先用 RTTI 名字字符串找到 `ServerNetworkHandler` 的 typeinfo → vtable；
-   - Windows 没有游戏类 RTTI，使用字符串 xref（例如 `ServerNetworkHandler::_onPlayerLeft`、源文件路径）和已知函数调用关系；
-   - Endstone 的 `scripts/dump_symbols.py` + `scripts/configs/{windows,linux}.toml` 是很好的签名模板（Apache-2.0）。
-3. 记录新的 RVA 和函数前 14–28 字节序言，更新 `src/runtime/version.cpp`。序言必须结束在完整指令边界，且不要包含 RIP-relative 或 rel8/rel32 跳转。
-4. 重新构建，先在测试服启动，确认 `yoyo.log` 中的四条 “inline hook installed” 都出现。
-5. 对 Windows 的两个 packet handler，用真实客户端连接一次，确认 `onJoin` / `onChat` 触发。
-
-## 8. 限制与安全
-
-- 仅支持 1.26.52.3；未知 build 不会安装任何 hook。
-- Windows 的 `onJoin` 已用离线 bot 实机验证（player_id 正确）；`onChat` 的 handler 已安装并经 Ghidra 反编译确认，但测试 bot 发出的聊天包被 BDS 丢弃，需要用真实客户端再确认一次。
-- Linux 的 `onJoin` 已用离线 bot 实机验证（player_id 正确）。`onChat` 的 handler 已安装，但测试 bot 发出的聊天包被 BDS 丢弃，需要用真实客户端再确认一次。
-- `onLeft` 目前挂在 `disconnectClientWithMessage` 上，适合踢人/超时等路径；客户端正常退出可能走另一条函数，后续会补 `_onPlayerLeft` / `ServerPlayer::disconnect`。
-- `onJoin` / `onLeft` 目前不一定能拿到 `ServerPlayer*`：join 包只有 ActorRuntimeID，left 只有 NetworkIdentifier。chat 通过 TextPacket 里的 xuid 回查 pre_join 缓存，通常能拿到玩家句柄。
-- `pre_join` 的 IP 字段暂为空；`PlayerAuthenticationInfo` 里没有直接地址，需要后续从 `ConnectionRequest` 的 token 中取。
-- JS 的表单 `sendTo`、实时方块/物品/容器/实体读取、`player.sendMessage` / `kick` / `teleport` 尚未接入 BDS，会明确抛错；不要把它们当成已实现功能。
-- JS 回调在游戏/网络线程同步执行，并持有引擎互斥锁；QuickJS 内存上限 64 MB。不要在回调里 sleep、做阻塞 I/O 或长循环。
-- 强制 trace / 反作弊软件可能阻止 `CreateRemoteThread` 或 `LD_PRELOAD`；这不是本项目要对抗的目标。
-- BDS 的 EULA / 许可对逆向和再分发有限制。请只分发你自己的 loader，不要重新分发修改后的 `bedrock_server`。
-
-## 9. 第三方与致谢
-
-- 1.26.52 的符号偏移与 fake header 交叉参考了 [Endstone](https://github.com/EndstoneMC/endstone)（Apache-2.0）公开的 `src/bedrock/symbols` 和 `scripts/configs`。
-- JavaScript 引擎使用 [QuickJS-ng](https://github.com/quickjs-ng/quickjs) 0.17.0（MIT），源码已放在 `third_party/quickjs`。
-- 设计思路参考了 Endstone 的 Windows `CreateProcessWithDlls` / Linux `LD_PRELOAD` 加载方式。
-- 没有使用 LeviLamina 的 PreLoader、PeEditor 或任何闭源符号文件；hook 地址来自本项目自己的版本表。
+- [QuickJS-ng](https://github.com/quickjs-ng/quickjs) 0.17.0（MIT），源码在
+  `third_party/quickjs`。
+- 没有使用 LeviLamina 的 PreLoader/PeEditor，也没有使用任何第三方符号文件；
+  hook 地址、序言和槽位来自本项目自己的版本表与二进制分析。

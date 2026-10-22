@@ -123,6 +123,7 @@ void emit_server_ready(const char* server_version, uintptr_t module_base) {
     event.server_version = server_version;
     event.module_base = module_base;
     call(snapshot(YOYO_EVENT_SERVER_READY), YOYO_EVENT_SERVER_READY, &event);
+    js::dispatch_server_ready(server_version ? server_version : "", module_base);
 }
 
 } // namespace yoyo

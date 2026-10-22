@@ -1,5 +1,9 @@
 #include "js_internal.h"
 
+#include "../live.h"
+#include "../log.h"
+
+#include <cstdint>
 #include <string>
 
 namespace yoyo::js {
@@ -30,8 +34,107 @@ JSValue form_to_json(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) 
     return JS_DupValue(ctx, this_val);
 }
 
-JSValue form_send_to(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-    return unsupported(ctx, "form sending is not implemented: the BDS form packet bridge is not available yet");
+std::string property_string(JSContext* ctx, JSValueConst object, const char* name) {
+    JSValue value = JS_GetPropertyStr(ctx, object, name);
+    std::string result = text_of(ctx, value);
+    JS_FreeValue(ctx, value);
+    return result;
+}
+
+JSValue copy_property(JSContext* ctx, JSValueConst source, const char* name) {
+    return JS_GetPropertyStr(ctx, source, name);
+}
+
+JSValue schema_element(JSContext* ctx, JSValueConst element) {
+    const std::string type = property_string(ctx, element, "type");
+    JSValue out = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, out, "text", JS_NewString(ctx, property_string(ctx, element, "title").c_str()));
+    if (type == "label") {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "label"));
+    } else if (type == "input") {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "input"));
+        JS_SetPropertyStr(ctx, out, "placeholder",
+                          JS_NewString(ctx, property_string(ctx, element, "placeholder").c_str()));
+        JS_SetPropertyStr(ctx, out, "default", copy_property(ctx, element, "default"));
+    } else if (type == "toggle") {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "toggle"));
+        JS_SetPropertyStr(ctx, out, "default", copy_property(ctx, element, "default"));
+    } else if (type == "dropdown") {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "dropdown"));
+        JS_SetPropertyStr(ctx, out, "options", copy_property(ctx, element, "options"));
+        JS_SetPropertyStr(ctx, out, "default", copy_property(ctx, element, "default"));
+    } else if (type == "slider") {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "slider"));
+        JS_SetPropertyStr(ctx, out, "min", copy_property(ctx, element, "min"));
+        JS_SetPropertyStr(ctx, out, "max", copy_property(ctx, element, "max"));
+        JS_SetPropertyStr(ctx, out, "step", copy_property(ctx, element, "step"));
+        JS_SetPropertyStr(ctx, out, "default", copy_property(ctx, element, "default"));
+    } else if (type == "step_slider") {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "step_slider"));
+        JS_SetPropertyStr(ctx, out, "steps", copy_property(ctx, element, "options"));
+        JS_SetPropertyStr(ctx, out, "default", copy_property(ctx, element, "default"));
+    } else {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "label"));
+    }
+    return out;
+}
+
+JSValue schema_form(JSContext* ctx, JSValueConst form) {
+    const std::string type = property_string(ctx, form, "type");
+    JSValue out = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, out, "title", JS_NewString(ctx, property_string(ctx, form, "title").c_str()));
+    if (type == "simple") {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "form"));
+        JS_SetPropertyStr(ctx, out, "content", JS_NewString(ctx, property_string(ctx, form, "content").c_str()));
+        JS_SetPropertyStr(ctx, out, "buttons", copy_property(ctx, form, "buttons"));
+    } else if (type == "modal") {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "modal"));
+        JS_SetPropertyStr(ctx, out, "content", JS_NewString(ctx, property_string(ctx, form, "content").c_str()));
+        JS_SetPropertyStr(ctx, out, "button1", JS_NewString(ctx, property_string(ctx, form, "confirm").c_str()));
+        JS_SetPropertyStr(ctx, out, "button2", JS_NewString(ctx, property_string(ctx, form, "cancel").c_str()));
+    } else {
+        JS_SetPropertyStr(ctx, out, "type", JS_NewString(ctx, "custom_form"));
+        JSValue content = JS_NewArray(ctx);
+        JSValue elements = JS_GetPropertyStr(ctx, form, "elements");
+        JSValue length_value = JS_GetPropertyStr(ctx, elements, "length");
+        int32_t length = 0;
+        JS_ToInt32(ctx, &length, length_value);
+        JS_FreeValue(ctx, length_value);
+        for (int32_t i = 0; i < length; ++i) {
+            JSValue element = JS_GetPropertyUint32(ctx, elements, static_cast<uint32_t>(i));
+            JS_SetPropertyUint32(ctx, content, static_cast<uint32_t>(i), schema_element(ctx, element));
+            JS_FreeValue(ctx, element);
+        }
+        JS_FreeValue(ctx, elements);
+        JS_SetPropertyStr(ctx, out, "content", content);
+    }
+    return out;
+}
+
+JSValue form_send_to(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 1 || !JS_IsObject(argv[0])) {
+        return JS_ThrowTypeError(ctx, "sendTo(player) requires a player");
+    }
+    JSValue handle_value = JS_GetPropertyStr(ctx, argv[0], "__handle");
+    int64_t handle_bits = 0;
+    if (JS_ToInt64(ctx, &handle_bits, handle_value) < 0) {
+        handle_bits = 0;
+    }
+    JS_FreeValue(ctx, handle_value);
+    void* handle = reinterpret_cast<void*>(static_cast<uintptr_t>(handle_bits));
+    if (handle == nullptr) {
+        return JS_ThrowInternalError(ctx, "form.sendTo requires a live Player");
+    }
+    JSValue schema = schema_form(ctx, this_val);
+    JSValue json = JS_JSONStringify(ctx, schema, JS_UNDEFINED, JS_UNDEFINED);
+    JS_FreeValue(ctx, schema);
+    if (JS_IsException(json)) {
+        log_exception(ctx);
+        return JS_EXCEPTION;
+    }
+    std::string text = text_of(ctx, json);
+    JS_FreeValue(ctx, json);
+    return JS_NewBool(ctx, live_send_form(handle, text));
 }
 
 JSValue form_set_title(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -163,7 +266,8 @@ void set_form_methods(JSContext* ctx, JSValue object, const char* array_property
     JS_SetPropertyStr(ctx, object, "setContent", JS_NewCFunction(ctx, form_set_content, "setContent", 1));
     JS_SetPropertyStr(ctx, object, "toJSON", JS_NewCFunction(ctx, form_to_json, "toJSON", 0));
     JS_SetPropertyStr(ctx, object, "toString", JS_NewCFunction(ctx, form_to_string, "toString", 0));
-    JS_SetPropertyStr(ctx, object, "sendTo", JS_NewCFunction(ctx, form_send_to, "sendTo", 2));
+    JS_SetPropertyStr(ctx, object, "sendTo", JS_NewCFunction(ctx, form_send_to, "sendTo", 1));
+    JS_SetPropertyStr(ctx, object, "send_to", JS_NewCFunction(ctx, form_send_to, "send_to", 1));
 }
 
 JSValue new_simple_form(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -198,7 +302,8 @@ JSValue new_modal_form(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
     JS_SetPropertyStr(ctx, object, "setContent", JS_NewCFunction(ctx, form_set_content, "setContent", 1));
     JS_SetPropertyStr(ctx, object, "toJSON", JS_NewCFunction(ctx, form_to_json, "toJSON", 0));
     JS_SetPropertyStr(ctx, object, "toString", JS_NewCFunction(ctx, form_to_string, "toString", 0));
-    JS_SetPropertyStr(ctx, object, "sendTo", JS_NewCFunction(ctx, form_send_to, "sendTo", 2));
+    JS_SetPropertyStr(ctx, object, "sendTo", JS_NewCFunction(ctx, form_send_to, "sendTo", 1));
+    JS_SetPropertyStr(ctx, object, "send_to", JS_NewCFunction(ctx, form_send_to, "send_to", 1));
     return object;
 }
 

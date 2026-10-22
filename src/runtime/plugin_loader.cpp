@@ -2,7 +2,9 @@
 
 #include "events.h"
 #include "js/js_engine.h"
+#include "live.h"
 #include "log.h"
+#include "players.h"
 #include "runtime.h"
 
 #include <yoyo/plugin.h>
@@ -50,6 +52,65 @@ int api_unregister_event(int type, yoyo_event_callback callback, void* user) {
     return unregister_event(type, callback, user) ? 0 : 1;
 }
 
+int api_player_send_message(void* player, const char* message) {
+    return live_send_text(player, message ? message : "", LiveTextType::Raw) ? 0 : 1;
+}
+
+int api_server_broadcast(const char* message) {
+    int sent = 0;
+    for (const auto& player : players_online()) {
+        if (player.handle != nullptr &&
+            live_send_text(player.handle, message ? message : "", LiveTextType::Raw)) {
+            ++sent;
+        }
+    }
+    return sent > 0 ? 0 : 1;
+}
+
+int api_player_kick(void* player, const char* reason) {
+    return live_kick(player, reason ? reason : "Kicked") ? 0 : 1;
+}
+
+int api_player_get_position(void* player, double* x, double* y, double* z) {
+    LiveVec3 position;
+    if (!live_get_position(player, position)) {
+        return 1;
+    }
+    if (x != nullptr) *x = position.x;
+    if (y != nullptr) *y = position.y;
+    if (z != nullptr) *z = position.z;
+    return 0;
+}
+
+int api_player_teleport(void* player, double x, double y, double z, int dimension) {
+    return live_teleport(player, LiveVec3{x, y, z}, dimension) ? 0 : 1;
+}
+
+int api_player_get_dimension(void* player) {
+    return live_get_dimension(player);
+}
+
+int api_player_send_title(void* player, const char* title, const char* subtitle, int fade_in, int stay,
+                          int fade_out) {
+    return live_send_title(player, title ? title : "", subtitle ? subtitle : "", fade_in, stay, fade_out) ? 0 : 1;
+}
+
+int api_player_send_actionbar(void* player, const char* text) {
+    return live_send_actionbar(player, text ? text : "") ? 0 : 1;
+}
+
+int api_player_send_form(void* player, const char* json) {
+    return live_send_form(player, json ? json : "{}") ? 0 : 1;
+}
+
+int api_player_get_game_mode(void* player) {
+    return live_get_game_mode(player);
+}
+
+int api_player_set_game_mode(void* player, int mode) {
+    return live_set_game_mode(player, mode) ? 0 : 1;
+}
+
 const yoyo_api kApi = {
     YOYO_PLUGIN_ABI_VERSION,
     &api_get_server_version,
@@ -57,6 +118,17 @@ const yoyo_api kApi = {
     &api_log,
     &api_register_event,
     &api_unregister_event,
+    &api_player_send_message,
+    &api_server_broadcast,
+    &api_player_kick,
+    &api_player_get_position,
+    &api_player_teleport,
+    &api_player_get_dimension,
+    &api_player_send_title,
+    &api_player_send_actionbar,
+    &api_player_send_form,
+    &api_player_get_game_mode,
+    &api_player_set_game_mode,
 };
 
 std::string to_utf8(const std::filesystem::path& path) {

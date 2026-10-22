@@ -34,6 +34,7 @@ cl %COMMON% /DYOYO_PLATFORM_WINDOWS=1 /DYOYO_RUNTIME_BUILD=1 /Iinclude /Isrc\run
     src\runtime\version.cpp ^
     src\runtime\hook_engine.cpp ^
     src\runtime\hooks.cpp ^
+    src\runtime\live.cpp ^
     src\runtime\events.cpp ^
     src\runtime\plugin_loader.cpp ^
     src\runtime\players.cpp ^
