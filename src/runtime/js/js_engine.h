@@ -6,6 +6,7 @@
 
 namespace yoyo {
 struct PlayerView;
+struct LiveVec3;
 }
 
 namespace yoyo::js {
@@ -18,5 +19,9 @@ void dispatch_join(const PlayerView& player, uint64_t player_id, bool& cancelled
 void dispatch_chat(const PlayerView& player, std::string& message, bool& cancelled);
 void dispatch_left(const PlayerView& player, std::string_view reason);
 void dispatch_server_ready(std::string_view version, uintptr_t module_base);
+void dispatch_tick(uint64_t tick);
+void dispatch_player_move(const PlayerView& player, const LiveVec3& from, const LiveVec3& to,
+                          int from_dimension, int to_dimension);
+void dispatch_player_dimension_change(const PlayerView& player, int from_dimension, int to_dimension);
 
 } // namespace yoyo::js

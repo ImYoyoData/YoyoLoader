@@ -8,7 +8,9 @@
 #include "players.h"
 #include "runtime.h"
 
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace yoyo {
 namespace {
@@ -25,6 +28,7 @@ InlineHook g_disconnect_hook;
 InlineHook g_join_hook;
 InlineHook g_chat_hook;
 InlineHook g_left_hook;
+InlineHook g_level_tick_hook;
 
 using PlayerLeftFn = void (*)(void* self, void* player, int sub_client_id);
 PlayerLeftFn g_left_original = nullptr;
@@ -111,43 +115,48 @@ void queue_join_watch(void* handle, const PlayerView& player) {
     log_write(LogLevel::Info, "join watch queued handle=%p", handle);
 }
 
-void install_level_tick_hook(void* actor) {
-    if (g_level_hook_installed || actor == nullptr) {
+void install_level_tick_hook(void*) {
+    if (g_level_hook_installed) {
         return;
     }
     const auto* version = state().profile;
-    if (version == nullptr || version->live.level_tick.rva == 0 || version->live.level_offset == 0) {
+    if (version == nullptr || version->live.level_tick.rva == 0 || version->live.level_tick.length < 14) {
         return;
     }
-    void* level = *reinterpret_cast<void**>(static_cast<unsigned char*>(actor) + version->live.level_offset);
-    if (level == nullptr) {
-        return;
+    void* target = reinterpret_cast<void*>(state().module.base + version->live.level_tick.rva);
+    bool ok = false;
+    if (version->live.level_tick_rip_offset != 0) {
+        ok = install_inline_hook_reloc(g_level_tick_hook, target, version->live.level_tick.bytes,
+                                       version->live.level_tick.length,
+                                       reinterpret_cast<void*>(&level_tick_detour),
+                                       version->live.level_tick_rip_offset,
+                                       version->live.level_tick_rip_instruction_length);
+    } else {
+        ok = install_inline_hook(g_level_tick_hook, target, version->live.level_tick.bytes,
+                                 version->live.level_tick.length,
+                                 reinterpret_cast<void*>(&level_tick_detour));
     }
-    auto** vtable = *reinterpret_cast<void***>(level);
-    if (vtable == nullptr) {
-        return;
-    }
-    const auto target = state().module.base + version->live.level_tick.rva;
-    for (int slot = 0; slot < 2048; ++slot) {
-        if (reinterpret_cast<uintptr_t>(vtable[slot]) != target) {
-            continue;
+    if (!ok) {
+        if (!g_level_hook_attempted) {
+            g_level_hook_attempted = true;
+            log_write(LogLevel::Warn, "Level::tick inline hook failed at rva=0x%llx",
+                      static_cast<unsigned long long>(version->live.level_tick.rva));
         }
-        const char* error = nullptr;
-        if (!install_vtable_hook(level, slot, reinterpret_cast<void*>(&level_tick_detour),
-                                 &g_level_tick_original, version->live.level_tick.bytes,
-                                 version->live.level_tick.length, &error)) {
-            log_write(LogLevel::Warn, "Level::tick vtable hook failed: %s", error ? error : "unknown");
-            return;
-        }
-        g_level_hook_installed = true;
-        log_write(LogLevel::Info, "Level::tick vtable hook installed slot=%d", slot);
         return;
     }
-    if (!g_level_hook_attempted) {
-        g_level_hook_attempted = true;
-        log_write(LogLevel::Warn, "Level::tick was not found in the Level vtable");
-    }
+    g_level_tick_original = g_level_tick_hook.trampoline;
+    g_level_hook_installed = true;
+    log_write(LogLevel::Info, "Level::tick inline hook installed rva=0x%llx length=%u",
+              static_cast<unsigned long long>(version->live.level_tick.rva),
+              static_cast<unsigned>(version->live.level_tick.length));
 }
+
+struct MoveState {
+    LiveVec3 position;
+    int dimension = -9999;
+};
+
+std::atomic<uint64_t> g_tick_counter{0};
 
 void level_tick_detour(void* level) {
     using TickFn = void (*)(void*);
@@ -155,46 +164,120 @@ void level_tick_detour(void* level) {
         reinterpret_cast<TickFn>(g_level_tick_original)(level);
     }
 
-    std::vector<PendingJoin> pending;
+    emit_tick(++g_tick_counter);
+
     {
-        std::lock_guard lock(pending_mutex());
-        pending.swap(pending_joins());
+        std::vector<PendingJoin> pending;
+        {
+            std::lock_guard lock(pending_mutex());
+            pending.swap(pending_joins());
+        }
+        if (!pending.empty()) {
+            const auto& offset = state().profile->live.join_flag_offset;
+            std::vector<PendingJoin> keep;
+            for (auto& item : pending) {
+                if (players_is_online(item.handle)) {
+                    continue;
+                }
+                const auto flag = *(static_cast<volatile unsigned char*>(item.handle) + offset);
+                if (flag == 0) {
+                    keep.push_back(std::move(item));
+                    continue;
+                }
+                if (item.player.runtime_id == 0) {
+                    item.player.runtime_id = live_runtime_id(item.handle);
+                }
+                if (auto joined = players_mark_joined(item.player.runtime_id); joined.has_value()) {
+                    PlayerView view;
+                    view.handle = joined->handle;
+                    view.name = joined->name;
+                    view.xuid = joined->xuid;
+                    view.address = joined->address;
+                    view.runtime_id = joined->runtime_id;
+                    bool cancelled = false;
+                    log_write(LogLevel::Info, "join watcher saw initialized handle=%p", item.handle);
+                    emit_join(view, view.runtime_id, cancelled);
+                }
+            }
+            if (!keep.empty()) {
+                std::lock_guard lock(pending_mutex());
+                auto& joins = pending_joins();
+                for (auto& item : keep) {
+                    joins.push_back(std::move(item));
+                }
+            }
+        }
     }
-    if (pending.empty()) {
-        return;
-    }
-    const auto& offset = state().profile->live.join_flag_offset;
-    std::vector<PendingJoin> keep;
-    for (auto& item : pending) {
-        if (players_is_online(item.handle)) {
+
+    /* Poll movement once per tick.  This runs on the game thread, so packet
+     * sends triggered by listeners are safe. */
+    struct MoveEvent {
+        PlayerView player;
+        LiveVec3 from;
+        LiveVec3 to;
+        int from_dimension = -9999;
+        int to_dimension = -9999;
+    };
+    static std::mutex state_mutex;
+    static std::unordered_map<void*, MoveState> states;
+    static std::vector<MoveEvent> moves;
+    static std::vector<std::pair<PlayerView, std::pair<int, int>>> dimension_changes;
+    moves.clear();
+    dimension_changes.clear();
+
+    std::unordered_set<void*> online_handles;
+    for (const auto& info : players_online()) {
+        if (info.handle == nullptr) {
             continue;
         }
-        const auto flag = *(static_cast<volatile unsigned char*>(item.handle) + offset);
-        if (flag == 0) {
-            keep.push_back(std::move(item));
+        online_handles.insert(info.handle);
+        LiveVec3 position;
+        if (!live_get_position(info.handle, position)) {
             continue;
         }
-        if (item.player.runtime_id == 0) {
-            item.player.runtime_id = live_runtime_id(item.handle);
+        const int dimension = live_get_dimension(info.handle);
+        PlayerView view;
+        view.handle = info.handle;
+        view.name = info.name;
+        view.xuid = info.xuid;
+        view.address = info.address;
+        view.runtime_id = info.runtime_id;
+
+        std::lock_guard lock(state_mutex);
+        auto it = states.find(info.handle);
+        if (it == states.end()) {
+            states[info.handle] = {position, dimension};
+            continue;
         }
-        if (auto joined = players_mark_joined(item.player.runtime_id); joined.has_value()) {
-            PlayerView view;
-            view.handle = joined->handle;
-            view.name = joined->name;
-            view.xuid = joined->xuid;
-            view.address = joined->address;
-            view.runtime_id = joined->runtime_id;
-            bool cancelled = false;
-            log_write(LogLevel::Info, "join watcher saw initialized handle=%p", item.handle);
-            emit_join(view, view.runtime_id, cancelled);
+        const LiveVec3& old = it->second.position;
+        const double dx = position.x - old.x;
+        const double dy = position.y - old.y;
+        const double dz = position.z - old.z;
+        const bool moved = dx * dx + dy * dy + dz * dz > 1e-4;
+        const bool changed_dimension = it->second.dimension != dimension;
+        if (changed_dimension) {
+            dimension_changes.push_back({view, {it->second.dimension, dimension}});
+        }
+        if (moved || changed_dimension) {
+            moves.push_back({view, old, position, it->second.dimension, dimension});
+        }
+        it->second = {position, dimension};
+    }
+    {
+        std::lock_guard lock(state_mutex);
+        for (auto it = states.begin(); it != states.end();) {
+            if (online_handles.find(it->first) == online_handles.end()) {
+                it = states.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
-    if (!keep.empty()) {
-        std::lock_guard lock(pending_mutex());
-        auto& joins = pending_joins();
-        for (auto& item : keep) {
-            joins.push_back(std::move(item));
-        }
+    for (auto& item : dimension_changes) {
+        emit_player_dimension_change(item.first, item.second.first, item.second.second);
+    }
+    for (auto& item : moves) {
+        emit_player_move(item.player, item.from, item.to, item.from_dimension, item.to_dimension);
     }
 }
 
@@ -464,6 +547,7 @@ bool install_player_hooks() {
                 reinterpret_cast<void*>(&text_packet_detour), reinterpret_cast<void**>(&g_text_packet_original));
     install_one(g_left_hook, "_onPlayerLeft", rt.profile->live.player_left,
                 reinterpret_cast<void*>(&player_left_detour), reinterpret_cast<void**>(&g_left_original));
+    install_level_tick_hook(nullptr);
     return true;
 }
 

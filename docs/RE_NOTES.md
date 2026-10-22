@@ -296,6 +296,7 @@ Windows 验证时，在 `version.cpp` 中填入两个 handler 的 RVA 和序言�
 | `Player::setPlayerGameType` | vtable `0x698` | vtable `0x690` |
 | `Dimension::getDimensionId` | vtable `0x18` | vtable `0x10` |
 | `_onPlayerLeft` | `0x89143F0` | `0x983800` |
+| `Level::tick` | `0xC897700` | `0x7CBFD0` |
 
 对象布局：
 
@@ -305,6 +306,11 @@ Windows 验证时，在 `version.cpp` 中填入两个 handler 的 RVA 和序言�
 - EnTT 组件在 dense page 中按值存放，组件指针 = `dense_page + index * size`。
   `RuntimeIDComponent`、`ActorUniqueIDComponent` 的大小均为 8。
 - `NetworkIdentifier` 176 字节；join handler 的第二个参数可以直接复制。
+- Linux `Level::tick` 的第 14 字节是 `0F B6 05 disp32`（RIP-relative），
+  inline hook 必须重定位该 disp32，并把 trampoline 分配在目标 ±2 GB 内；
+  Windows 前 30 字节没有 RIP-relative，可直接复制。
+- `onPlayerMove` 和 `onPlayerChangeDimension` 不需要额外 packet hook，
+  在 `Level::tick` 的 detour 中按玩家轮询位置/维度即可。
 
 ## 9. 已知未完成项
 

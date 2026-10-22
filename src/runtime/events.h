@@ -6,6 +6,8 @@
 
 #include <yoyo/plugin.h>
 
+#include "live.h"
+
 namespace yoyo {
 
 struct PlayerView {
@@ -24,5 +26,9 @@ void emit_join(PlayerView& player, uint64_t player_id, bool& cancelled);
 void emit_chat(PlayerView& player, std::string& message, bool& cancelled);
 void emit_left(PlayerView& player, std::string_view reason);
 void emit_server_ready(const char* server_version, uintptr_t module_base);
+void emit_tick(uint64_t tick);
+void emit_player_move(PlayerView& player, const LiveVec3& from, const LiveVec3& to, int from_dimension,
+                      int to_dimension);
+void emit_player_dimension_change(PlayerView& player, int from_dimension, int to_dimension);
 
 } // namespace yoyo

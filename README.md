@@ -94,6 +94,9 @@ cmake --build build --config Release
 | `onLeft` | `ServerNetworkHandler::_onPlayerLeft` | 否 | Windows / Linux 实测，覆盖正常退出、踢人和超时 |
 | `onLeft`（兼容路径） | `disconnectClientWithMessage` | 否 | 与上一个事件去重 |
 | `onServerReady` | 插件加载完成后 | 否 | 两端实测 |
+| `onTick` | `Level::tick` 内联 hook | 否 | Windows / Linux 实测 |
+| `onPlayerMove` | `Level::tick` 中轮询位置 | 否 | Windows / Linux 实测，阈值 0.01 格 |
+| `onPlayerChangeDimension` | `Level::tick` 中比较维度 | 否 | 已实现，等待跨维度场景实测 |
 
 `onChat` 会原地修改原生 `TextPacket` 的字符串；如果新消息超过原字符串容量，
 会保留原消息并写警告日志。不要依赖“取消后还能继续发包”的语义。
@@ -107,9 +110,10 @@ cmake --build build --config Release
 | `SetLocalPlayerAsInitialized` | `0x8911320` | `0x980970` | 24 / 28 |
 | `TextPacket` | `0x8905AD0` | `0x973B30` | 27 / 27 |
 | `_onPlayerLeft` | `0x89143F0` | `0x983800` | 22 / 27 |
+| `Level::tick`（内联） | `0xC897700` | `0x7CBFD0` | 20 / 30 |
 
-序言在 patch 前逐字节校验。`Level::tick` 的 vtable 钩子代码保留在 runtime 中，
-但当前版本没有用它处理事件；所有事件都走上面的定点 hook。
+序言在 patch 前逐字节校验。Linux 的 `Level::tick` 序言含一条 RIP-relative 指令，
+trampoline 会重定位它，并分配在 BDS 映射附近以保证 rel32 可达。
 
 ## 5. 实时 API（YoyoLoader 原生）
 
@@ -164,6 +168,15 @@ player.kick("reason");
 mc.getOnlinePlayers();
 mc.getOnlinePlayerCount();
 mc.broadcast("hello everyone");
+
+// 服务器 tick 与移动
+mc.listen("onTick", (event) => {
+    // event.tick 是服务器累计 tick
+});
+mc.listen("onPlayerMove", (player, from, to) => {
+    // from/to: { x, y, z, dimension, dimensionName }
+});
+mc.listen("onPlayerChangeDimension", (player, fromDimension, toDimension) => {});
 
 // 表单（真实下发）
 const form = mc.newSimpleForm("Title", "Content");
@@ -222,6 +235,14 @@ int (*player_send_actionbar)(void *player, const char *text);
 int (*player_send_form)(void *player, const char *json);
 int (*player_get_game_mode)(void *player);
 int (*player_set_game_mode)(void *player, int mode);
+```
+
+事件 ABI 新增：
+
+```c
+YOYO_EVENT_TICK                    // const yoyo_tick_event*
+YOYO_EVENT_PLAYER_MOVE             // const yoyo_player_move_event*
+YOYO_EVENT_PLAYER_CHANGE_DIMENSION // const yoyo_player_dimension_event*
 ```
 
 ### C++

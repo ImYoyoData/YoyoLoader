@@ -71,12 +71,19 @@ std::string normalize_event(std::string name) {
     if (name == "onChat" || name == "chat") return "onChat";
     if (name == "onLeft" || name == "left") return "onLeft";
     if (name == "onServerReady" || name == "server_ready") return "onServerReady";
+    if (name == "onTick" || name == "tick") return "onTick";
+    if (name == "onPlayerMove" || name == "player_move") return "onPlayerMove";
+    if (name == "onPlayerChangeDimension" || name == "player_change_dimension" ||
+        name == "player_dimension") {
+        return "onPlayerChangeDimension";
+    }
     return name;
 }
 
 bool implemented_event(const std::string& name) {
     return name == "onPreJoin" || name == "onJoin" || name == "onChat" || name == "onLeft" ||
-           name == "onServerReady";
+           name == "onServerReady" || name == "onTick" || name == "onPlayerMove" ||
+           name == "onPlayerChangeDimension";
 }
 
 bool call_listeners_locked(const std::string& event, int argc, JSValueConst* argv) {
@@ -797,6 +804,51 @@ void dispatch_server_ready(std::string_view version, uintptr_t module_base) {
     JSValue args[1] = {event};
     call_listeners_locked("onServerReady", 1, args);
     JS_FreeValue(g_context, event);
+}
+
+void dispatch_tick(uint64_t tick) {
+    std::lock_guard lock(g_mutex);
+    if (g_context == nullptr) return;
+    auto it = g_listeners.find("onTick");
+    if (it == g_listeners.end() || it->second.empty()) return;
+    JS_UpdateStackTop(g_runtime);
+    JSValue event = JS_NewObject(g_context);
+    JS_SetPropertyStr(g_context, event, "tick", JS_NewInt64(g_context, static_cast<int64_t>(tick)));
+    JSValue args[1] = {event};
+    call_listeners_locked("onTick", 1, args);
+    JS_FreeValue(g_context, event);
+}
+
+void dispatch_player_move(const PlayerView& player, const LiveVec3& from, const LiveVec3& to,
+                          int from_dimension, int to_dimension) {
+    std::lock_guard lock(g_mutex);
+    if (g_context == nullptr) return;
+    auto it = g_listeners.find("onPlayerMove");
+    if (it == g_listeners.end() || it->second.empty()) return;
+    JS_UpdateStackTop(g_runtime);
+    JSValue js_player = make_player(g_context, player);
+    JSValue js_from = make_location(g_context, from, from_dimension, false, 0.0f, 0.0f);
+    JSValue js_to = make_location(g_context, to, to_dimension, false, 0.0f, 0.0f);
+    JSValue args[3] = {js_player, js_from, js_to};
+    call_listeners_locked("onPlayerMove", 3, args);
+    JS_FreeValue(g_context, js_player);
+    JS_FreeValue(g_context, js_from);
+    JS_FreeValue(g_context, js_to);
+}
+
+void dispatch_player_dimension_change(const PlayerView& player, int from_dimension, int to_dimension) {
+    std::lock_guard lock(g_mutex);
+    if (g_context == nullptr) return;
+    auto it = g_listeners.find("onPlayerChangeDimension");
+    if (it == g_listeners.end() || it->second.empty()) return;
+    JS_UpdateStackTop(g_runtime);
+    JSValue js_player = make_player(g_context, player);
+    JSValue args[3] = {js_player, JS_NewInt32(g_context, from_dimension),
+                       JS_NewInt32(g_context, to_dimension)};
+    call_listeners_locked("onPlayerChangeDimension", 3, args);
+    JS_FreeValue(g_context, args[0]);
+    JS_FreeValue(g_context, args[1]);
+    JS_FreeValue(g_context, args[2]);
 }
 
 } // namespace yoyo::js

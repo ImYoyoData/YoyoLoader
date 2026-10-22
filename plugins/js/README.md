@@ -27,13 +27,26 @@ mc.listen("onLeft", (player, reason) => {});
 mc.listen("onServerReady", (event) => {
     // event.serverVersion, event.moduleBase
 });
+mc.listen("onTick", (event) => {
+    // event.tick: cumulative server tick
+});
+mc.listen("onPlayerMove", (player, from, to) => {
+    // from/to: { x, y, z, dimension, dimensionName }
+});
+mc.listen("onPlayerChangeDimension", (player, fromDimension, toDimension) => {});
 ```
 
-Aliases: `pre_join`, `join`, `chat`, `left`.
+Aliases: `pre_join`, `join`, `chat`, `left`, `server_ready`, `tick`,
+`player_move`, `player_change_dimension`.
 
 `onLeft` is driven by `ServerNetworkHandler::_onPlayerLeft` and fires for normal
 quits, kicks and timeouts. `onChat` rewrites the native TextPacket string in
 place; if the new text does not fit, the original is kept.
+
+`onTick` fires every server tick (20 times per second by default) and is
+intended for short, cheap work. `onPlayerMove` is polled from the same tick
+loop with a 0.01-block threshold; it fires at most once per tick per player.
+`onPlayerChangeDimension` is emitted when the polled dimension changes.
 
 Other LLSE event names are accepted by `mc.listen` but only log a warning; they
 do not fire in this build.

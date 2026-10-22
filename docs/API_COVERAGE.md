@@ -19,6 +19,9 @@
 | `onChat` | ✅（功能）/ 🟡（真实客户端） | `TextPacket` hook；支持 `event.message` 原生重写；测试 bot 的聊天包被 BDS 丢弃 |
 | `onLeft` | ✅ | `_onPlayerLeft` inline hook；正常退出、踢人、超时均实测；`disconnectClientWithMessage` 路径去重 |
 | `onServerReady` | ✅ | 插件加载完成后触发 |
+| `onTick` | ✅ | `Level::tick` 内联 hook，Windows/Linux 实测 |
+| `onPlayerMove` | ✅ | tick 内轮询位置，阈值 0.01 格；传送/移动实测 |
+| `onPlayerChangeDimension` | 🟡 | tick 内比较维度；逻辑已接入，等待跨维度场景实测 |
 | 其他 LLSE 事件 | ❌ | `mc.listen` 会警告，不触发 |
 
 ## 玩家
@@ -104,6 +107,7 @@
 
 - 服务器启动、注入、四条 inline hook + `_onPlayerLeft` 安装
 - pre_join / join / left 事件
+- onTick / onPlayerMove（Windows/Linux 实测）
 - 玩家位置、脚位、朝向、维度
 - sendMessage、sendTitle、sendTip、sendPopup、sendToast、sendActionBar、resetTitle
 - SimpleForm 下发（客户端收到 ModalFormRequest）

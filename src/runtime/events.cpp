@@ -50,7 +50,7 @@ void call(const std::vector<Registration>& callbacks, int type, const void* even
 } // namespace
 
 bool register_event(int type, yoyo_event_callback callback, void* user) {
-    if (callback == nullptr || type < YOYO_EVENT_PRE_JOIN || type > YOYO_EVENT_SERVER_READY) {
+    if (callback == nullptr || type < YOYO_EVENT_PRE_JOIN || type > YOYO_EVENT_PLAYER_CHANGE_DIMENSION) {
         return false;
     }
     std::lock_guard lock(g_mutex);
@@ -124,6 +124,38 @@ void emit_server_ready(const char* server_version, uintptr_t module_base) {
     event.module_base = module_base;
     call(snapshot(YOYO_EVENT_SERVER_READY), YOYO_EVENT_SERVER_READY, &event);
     js::dispatch_server_ready(server_version ? server_version : "", module_base);
+}
+
+void emit_tick(uint64_t tick) {
+    yoyo_tick_event event{};
+    event.tick = tick;
+    call(snapshot(YOYO_EVENT_TICK), YOYO_EVENT_TICK, &event);
+    js::dispatch_tick(tick);
+}
+
+void emit_player_move(PlayerView& player, const LiveVec3& from, const LiveVec3& to, int from_dimension,
+                      int to_dimension) {
+    yoyo_player_move_event event{};
+    fill_player(event.player, player);
+    event.from_x = from.x;
+    event.from_y = from.y;
+    event.from_z = from.z;
+    event.to_x = to.x;
+    event.to_y = to.y;
+    event.to_z = to.z;
+    event.from_dimension = from_dimension;
+    event.to_dimension = to_dimension;
+    call(snapshot(YOYO_EVENT_PLAYER_MOVE), YOYO_EVENT_PLAYER_MOVE, &event);
+    js::dispatch_player_move(player, from, to, from_dimension, to_dimension);
+}
+
+void emit_player_dimension_change(PlayerView& player, int from_dimension, int to_dimension) {
+    yoyo_player_dimension_event event{};
+    fill_player(event.player, player);
+    event.from_dimension = from_dimension;
+    event.to_dimension = to_dimension;
+    call(snapshot(YOYO_EVENT_PLAYER_CHANGE_DIMENSION), YOYO_EVENT_PLAYER_CHANGE_DIMENSION, &event);
+    js::dispatch_player_dimension_change(player, from_dimension, to_dimension);
 }
 
 } // namespace yoyo

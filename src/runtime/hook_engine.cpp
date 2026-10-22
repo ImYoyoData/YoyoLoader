@@ -1,5 +1,6 @@
 #include "hook_engine.h"
 
+#include <climits>
 #include <cstring>
 
 #ifdef _WIN32
@@ -74,12 +75,82 @@ void write_absolute_jump(uint8_t* at, const void* destination) {
 
 } // namespace
 
+bool install_call_hook(void* call_site, void* detour, void** original) {
+    if (call_site == nullptr || detour == nullptr || original == nullptr) {
+        return false;
+    }
+    auto* code = static_cast<uint8_t*>(call_site);
+    if (code[0] != 0xE8) {
+        return false;
+    }
+    int32_t old_relative = 0;
+    std::memcpy(&old_relative, code + 1, sizeof(old_relative));
+    auto* old_target = code + 5 + old_relative;
+    const auto delta = static_cast<int64_t>(reinterpret_cast<intptr_t>(detour) -
+                                            reinterpret_cast<intptr_t>(code + 5));
+    if (delta < INT32_MIN || delta > INT32_MAX) {
+        return false;
+    }
+    const auto new_relative = static_cast<int32_t>(delta);
+
+    uintptr_t old_state = 0;
+    if (!make_writable(code, 5, old_state)) {
+        return false;
+    }
+    std::memcpy(code + 1, &new_relative, sizeof(new_relative));
+    flush_code(code, 5);
+    restore_protection(code, 5, old_state);
+
+    *original = old_target;
+    return true;
+}
+
 void* alloc_executable(size_t size) {
 #ifdef _WIN32
     return VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 #else
     void* result = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     return result == MAP_FAILED ? nullptr : result;
+#endif
+}
+
+void* alloc_executable_near(void* near, size_t size) {
+    if (near == nullptr) {
+        return nullptr;
+    }
+    const uintptr_t target = reinterpret_cast<uintptr_t>(near);
+#ifdef _WIN32
+    const intptr_t offsets[] = {0x10000000, -0x10000000, 0x20000000, -0x20000000,
+                                0x30000000, -0x30000000, 0x40000000, -0x40000000};
+    for (const intptr_t offset : offsets) {
+        auto hint = reinterpret_cast<void*>(target + offset);
+        void* result = VirtualAlloc(hint, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (result != nullptr) {
+            const auto distance = reinterpret_cast<intptr_t>(result) - static_cast<intptr_t>(target);
+            if (distance > INT32_MIN && distance < INT32_MAX) {
+                return result;
+            }
+            VirtualFree(result, 0, MEM_RELEASE);
+        }
+    }
+    return nullptr;
+#else
+    const intptr_t offsets[] = {0x10000000, -0x10000000, 0x20000000, -0x20000000,
+                                0x30000000, -0x30000000, 0x40000000, -0x40000000};
+    for (const intptr_t offset : offsets) {
+        auto hint = reinterpret_cast<void*>(target + offset);
+        void* result = mmap(hint, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (result == MAP_FAILED) {
+            continue;
+        }
+        const auto distance = reinterpret_cast<intptr_t>(result) - static_cast<intptr_t>(target);
+        if (distance > INT32_MIN && distance < INT32_MAX) {
+            return result;
+        }
+        munmap(result, size);
+    }
+    return nullptr;
 #endif
 }
 
@@ -114,6 +185,62 @@ bool install_inline_hook(InlineHook& hook,
     }
     auto* tramp = static_cast<uint8_t*>(trampoline);
     std::memcpy(tramp, code, expected_length);
+    write_absolute_jump(tramp + expected_length,
+                        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(target) + expected_length));
+
+    uintptr_t old_state = 0;
+    if (!make_writable(code, expected_length, old_state)) {
+        free_executable(trampoline, expected_length + kJumpSize);
+        return false;
+    }
+    std::memcpy(hook.original, code, expected_length);
+    write_absolute_jump(code, detour);
+    for (size_t i = kJumpSize; i < expected_length; ++i) {
+        code[i] = 0x90;
+    }
+    flush_code(code, expected_length);
+    restore_protection(code, expected_length, old_state);
+
+    hook.target = target;
+    hook.trampoline = trampoline;
+    hook.patch_length = expected_length;
+    hook.installed = true;
+    return true;
+}
+
+bool install_inline_hook_reloc(InlineHook& hook,
+                               void* target,
+                               const uint8_t* expected,
+                               size_t expected_length,
+                               void* detour,
+                               size_t disp_offset,
+                               size_t instruction_length) {
+    if (target == nullptr || expected == nullptr || detour == nullptr || expected_length < kJumpSize ||
+        disp_offset + sizeof(int32_t) > expected_length || instruction_length < sizeof(int32_t)) {
+        return false;
+    }
+    auto* code = static_cast<uint8_t*>(target);
+    if (std::memcmp(code, expected, expected_length) != 0) {
+        return false;
+    }
+    void* trampoline = alloc_executable_near(code, expected_length + kJumpSize);
+    if (trampoline == nullptr) {
+        return false;
+    }
+    auto* tramp = static_cast<uint8_t*>(trampoline);
+    std::memcpy(tramp, code, expected_length);
+
+    int32_t old_disp = 0;
+    std::memcpy(&old_disp, code + disp_offset, sizeof(old_disp));
+    const auto old_effective = reinterpret_cast<intptr_t>(code + disp_offset + sizeof(int32_t)) + old_disp;
+    const auto new_disp_value =
+        old_effective - (reinterpret_cast<intptr_t>(tramp + disp_offset + sizeof(int32_t)));
+    if (new_disp_value < INT32_MIN || new_disp_value > INT32_MAX) {
+        free_executable(trampoline, expected_length + kJumpSize);
+        return false;
+    }
+    const auto new_disp = static_cast<int32_t>(new_disp_value);
+    std::memcpy(tramp + disp_offset, &new_disp, sizeof(new_disp));
     write_absolute_jump(tramp + expected_length,
                         reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(target) + expected_length));
 

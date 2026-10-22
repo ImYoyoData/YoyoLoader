@@ -29,7 +29,10 @@ typedef enum yoyo_event_type {
     YOYO_EVENT_JOIN = 2,     /* player finished loading the world */
     YOYO_EVENT_CHAT = 3,     /* player chat message; cancellable */
     YOYO_EVENT_LEFT = 4,     /* player disconnected */
-    YOYO_EVENT_SERVER_READY = 5
+    YOYO_EVENT_SERVER_READY = 5,
+    YOYO_EVENT_TICK = 6,     /* one server tick */
+    YOYO_EVENT_PLAYER_MOVE = 7,
+    YOYO_EVENT_PLAYER_CHANGE_DIMENSION = 8
 } yoyo_event_type;
 
 /*
@@ -73,6 +76,28 @@ typedef struct yoyo_server_ready_event {
     const char *server_version;
     uintptr_t module_base;
 } yoyo_server_ready_event;
+
+typedef struct yoyo_tick_event {
+    uint64_t tick;
+} yoyo_tick_event;
+
+typedef struct yoyo_player_move_event {
+    yoyo_player_view player;
+    double from_x;
+    double from_y;
+    double from_z;
+    double to_x;
+    double to_y;
+    double to_z;
+    int from_dimension;
+    int to_dimension;
+} yoyo_player_move_event;
+
+typedef struct yoyo_player_dimension_event {
+    yoyo_player_view player;
+    int from_dimension;
+    int to_dimension;
+} yoyo_player_dimension_event;
 
 typedef void(YOYO_CALL *yoyo_event_callback)(void *user, int type, const void *event);
 

@@ -18,6 +18,8 @@ struct Prologue {
 struct LiveProfile {
     Prologue create_packet;
     Prologue level_tick;
+    uint32_t level_tick_rip_offset = 0;
+    uint32_t level_tick_rip_instruction_length = 0;
     Prologue player_left;
     uint32_t send_network_packet_slot = 0;
     uint32_t teleport_slot = 0;
