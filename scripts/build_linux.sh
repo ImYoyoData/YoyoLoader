@@ -8,6 +8,9 @@ STATIC="${YOYO_STATIC:-1}"
 
 mkdir -p "$OUT/bin/plugins" "$OUT/qjs"
 
+echo "[build-linux] compiler: $("$CXX" --version | head -1)"
+echo "[build-linux] c compiler: $("$CC" --version | head -1)"
+
 STATIC_FLAGS=()
 if [[ "$STATIC" == "1" ]]; then
     STATIC_FLAGS=(-static-libstdc++ -static-libgcc)

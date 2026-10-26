@@ -90,13 +90,22 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld
+          # Pin the same major version the project is developed against; a newer
+          # clang on the runner turns new warnings into build differences.
+          sudo apt-get install -y clang-14 lld-14
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
+          clang++ --version
 
       - name: Build
         env:
           CXX: clang++
           CC: clang
-        run: scripts/build_linux.sh
+        run: |
+          set -x
+          clang++ --version
+          clang --version
+          bash -x scripts/build_linux.sh 2>&1 | tail -80
 
       - name: Package
         run: |
