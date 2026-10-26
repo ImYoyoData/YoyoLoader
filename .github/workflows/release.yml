@@ -133,7 +133,11 @@ jobs:
         env:
           CXX: clang++
           CC: clang
-        run: scripts/build_linux.sh
+        run: |
+          # Capture everything: a silent failure with no compiler output is
+          # almost always the script itself not running.
+          bash -x scripts/build_linux.sh 2>&1 | tail -120
+          exit ${PIPESTATUS[0]}
 
       - name: Package
         run: |
