@@ -134,6 +134,57 @@ chmod +x scripts/package_linux.sh
 
 产物在 `dist/`。
 
+## 解压验收测试
+
+发布包必须能在**干净 BDS 目录**里直接运行，不能依赖任何已存在的 yoyo 文件。
+
+### Windows 实测
+
+```text
+1. 复制 BDS 到空目录（不含 yoyo.exe / yoyo_runtime.dll）
+2. 解压 YoyoLoader-<ver>-win64.zip 到该目录
+3. 运行 yoyo.exe
+```
+
+结果：
+
+```text
+[INFO] module: ...\_accept\winedrock_server.exe
+[INFO] build id: d9f9837c2108f3824c4c44205044422e1
+[INFO] build matched an exact version profile
+[INFO] all features enabled for this build
+[INFO] inline hook installed tryToLoadPlayer / SetLocalPlayerAsInitialized /
+       disconnectClientWithMessage / TextPacket / _onPlayerLeft
+[INFO] Level::tick inline hook installed
+[INFO] packet factory hook installed
+[INFO] plugin loader finished: 1 native, 3 javascript, 0 skipped
+```
+
+bot 连接后收到 `§a[YoyoLoader] hello from the C++ sample`，说明注入、事件、
+插件全部生效。
+
+### Linux 实测
+
+```text
+1. 复制 BDS 到空目录（不含 yoyo / libyoyo_runtime.so）
+2. tar -xzf YoyoLoader-<ver>-linux64.tar.gz -C <dir>
+3. chmod +x yoyo && ./yoyo
+```
+
+结果：
+
+```text
+[INFO] build id: 519f9a2c3cdc31c85ef87dd2f128f79136f854d4
+[INFO] build matched an exact version profile
+[INFO] version support: 1.26.70.21 (linux)
+[WARN] limited features on this build: ...
+[INFO] inline hook installed SetLocalPlayerAsInitialized rva=0x9199160
+[INFO] plugin loader finished: 1 native, 3 javascript, 0 skipped
+Quit correctly
+```
+
+受限版本上原生插件仍能加载；它调用的 API 会因能力门控返回失败，不会崩溃。
+
 ## 发布前检查清单
 
 - [ ] `dev` 工作区干净
