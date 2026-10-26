@@ -72,6 +72,23 @@ jobs:
         shell: cmd
         run: scripts\package_windows.bat ${{ needs.prepare.outputs.version }}
 
+      - name: Verify archive contents
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist/*.zip | Select-Object -First 1
+          $names = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName).Entries.FullName
+          $required = @('yoyo.exe','yoyo_runtime.dll','README.txt',
+                        'plugins/home/manifest.json','plugins/home/main.js',
+                        'plugins/title/manifest.json','plugins/tpa/manifest.json',
+                        'plugins/sample_cpp/manifest.json')
+          $missing = $required | Where-Object { $names -notcontains $_ }
+          if ($missing) {
+            Write-Error "archive is missing: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "archive OK: $($names.Count) entries"
+          $names | Sort-Object
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -111,6 +128,30 @@ jobs:
         run: |
           chmod +x scripts/package_linux.sh
           ./scripts/package_linux.sh ${{ needs.prepare.outputs.version }}
+
+      - name: Verify archive contents
+        run: |
+          set -e
+          ARCHIVE=$(ls dist/*.tar.gz | head -1)
+          echo "checking $ARCHIVE"
+          LIST=$(tar -tzf "$ARCHIVE" | sed 's|^\./||' | sort)
+          REQUIRED="yoyo
+          libyoyo_runtime.so
+          README.txt
+          plugins/home/manifest.json
+          plugins/home/main.js
+          plugins/title/manifest.json
+          plugins/tpa/manifest.json"
+          MISSING=""
+          for f in $REQUIRED; do
+            if ! echo "$LIST" | grep -qx "$f"; then MISSING="$MISSING $f"; fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "archive is missing:$MISSING"
+            exit 1
+          fi
+          echo "archive OK"
+          echo "$LIST"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

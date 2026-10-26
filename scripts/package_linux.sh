@@ -44,9 +44,8 @@ fi
 
 for plugin in home title tpa; do
     mkdir -p "$STAGE/plugins/$plugin"
-    cp "$ROOT/plugins/$plugin.js" "$STAGE/plugins/$plugin/main.js"
-    printf '%s\n' "{\"name\":\"$plugin\",\"version\":\"1.0.0\",\"engine\":\"javascript\",\"entry\":\"main.js\"}" \
-        > "$STAGE/plugins/$plugin/manifest.json"
+    cp "$ROOT/plugins/$plugin/main.js" "$STAGE/plugins/$plugin/main.js"
+    cp "$ROOT/plugins/$plugin/manifest.json" "$STAGE/plugins/$plugin/manifest.json"
 done
 
 echo "[package] writing README.txt"

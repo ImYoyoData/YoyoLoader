@@ -94,8 +94,10 @@ scripts\build_windows.bat
 bedrock_server.exe
 yoyo.exe
 yoyo_runtime.dll
-plugins\sample_cpp.dll
-plugins\live_demo.js
+plugins\sample_cpp\sample_cpp.dll
+plugins\sample_cpp\manifest.json
+plugins\home\main.js
+plugins\home\manifest.json
 ```
 
 运行 `yoyo.exe`。日志写入同目录 `yoyo.log`。
@@ -112,8 +114,10 @@ bash scripts/build_linux.sh
 bedrock_server
 yoyo
 libyoyo_runtime.so
-plugins/sample_cpp.so
-plugins/live_demo.js
+plugins/sample_cpp/sample_cpp.so
+plugins/sample_cpp/manifest.json
+plugins/home/main.js
+plugins/home/manifest.json
 ```
 
 运行 `./yoyo`。脚本默认静态链接 libstdc++；如果目标机使用不同的 glibc，
@@ -477,9 +481,10 @@ go build -buildmode=c-shared -o sample_go.dll .
 
 ### JavaScript
 
-运行时内嵌 **QuickJS-ng 0.17.0**（MIT，`third_party/quickjs`）。把 `.js` 放到
-`<server>/plugins/` 即可。示例见 [plugins/live_demo.js](plugins/live_demo.js)
-和 [plugins/title.js](plugins/title.js)，API 细节见 [plugins/js/README.md](plugins/js/README.md)。
+运行时内嵌 **QuickJS-ng 0.17.0**（MIT，`third_party/quickjs`）。每个插件是
+`<server>/plugins/<名字>/` 目录，内含 `manifest.json` 和入口脚本；松散 `.js`
+首次启动会自动打包成目录。自带示例：`plugins/home`、`plugins/title`、`plugins/tpa`。
+完整 API 见 [wiki/](wiki/README.md)。
 
 ```js
 mc.listen("onJoin", (player) => {

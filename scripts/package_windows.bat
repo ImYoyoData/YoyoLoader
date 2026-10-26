@@ -53,8 +53,8 @@ rem Ship the three example plugins in manifest form so users have working
 rem examples on first run.
 for %%P in (home title tpa) do (
     mkdir "%STAGE%\plugins\%%P" 2>nul
-    copy /y "%ROOT%\plugins\%%P.js" "%STAGE%\plugins\%%P\main.js" >nul 2>nul
-    > "%STAGE%\plugins\%%P\manifest.json" echo {"name":"%%P","version":"1.0.0","engine":"javascript","entry":"main.js"}
+    copy /y "%ROOT%\plugins\%%P\main.js" "%STAGE%\plugins\%%P\main.js" >nul || exit /b 1
+    copy /y "%ROOT%\plugins\%%P\manifest.json" "%STAGE%\plugins\%%P\manifest.json" >nul || exit /b 1
 )
 
 echo [package] writing README.txt

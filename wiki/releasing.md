@@ -15,7 +15,19 @@
 日常提交只进 `dev`（见 [PROJECT_RULES.md](../PROJECT_RULES.md)）。
 用户说「发布版本」时才合并到 `main`。
 
-## 发布步骤
+## 一条命令发布
+
+```bash
+git checkout dev
+./scripts/release.sh 0.1.0
+```
+
+脚本会做完整流程：检查工作区干净 → 检查 tag 不存在 → 拉取 origin →
+`dev` 合并到 `main`（`--no-ff`）→ 打 tag `v0.1.0` → 推送 `main` 和 tag。
+
+推送 tag 后 GitHub Actions 自动构建两个平台、打包、创建 Release。
+
+## 手动发布步骤
 
 ### 1. 在 dev 上确认状态
 
@@ -192,10 +204,12 @@ Quit correctly
 **症状**：Windows job 成功，Linux job 在 `Build` 步骤直接失败，没有任何编译错误输出。
 
 **根因**：脚本被以 CRLF 提交。GitHub checkout 到 Linux 后 shebang 变成
-`#!/usr/bin/env bash`，报错：
+`#!/usr/bin/env bash
+`，报错：
 
 ```text
-/usr/bin/env: 'bash': No such file or directory
+/usr/bin/env: 'bash
+': No such file or directory
 ```
 
 **修复**：新增 `.gitattributes`，按文件类型强制换行：
@@ -231,9 +245,46 @@ CI 也用 `bash -x` 输出完整命令轨迹。
 | Job | 结果 |
 |---|---|
 | `prepare` | ✅ |
-| `build-windows` | ✅ Build / Package / Upload artifact |
-| `build-linux` | ✅ Build / Package / Upload artifact |
+| `build-windows` | ✅ Build / Package / Verify / Upload |
+| `build-linux` | ✅ Build / Package / Verify / Upload |
 | `release` | ⏭ 跳过（非 tag / 未填版本） |
+
+### 产物内容校验
+
+CI 在打包后会检查压缩包必须包含：
+
+```text
+yoyo.exe / yoyo
+yoyo_runtime.dll / libyoyo_runtime.so
+README.txt
+plugins/home/manifest.json       plugins/home/main.js
+plugins/title/manifest.json      plugins/title/main.js
+plugins/tpa/manifest.json        plugins/tpa/main.js
+plugins/sample_cpp/manifest.json
+```
+
+缺任何一项都会让 job 失败，不会发布残缺的包。
+
+### 换行符防复发
+
+`.gitattributes` 控制索引层，`.editorconfig` 控制编辑器层。两者都存在时，
+Windows 上编辑 shell 脚本也不会再写成 CRLF。
+
+如果本地脚本已经变成 CRLF：
+
+```bash
+python -c "
+from pathlib import Path
+for p in Path('scripts').glob('*.sh'):
+    b = p.read_bytes()
+    if b'
+' in b:
+        p.write_bytes(b.replace(b'
+', b'
+'))
+        print('fixed', p)
+"
+```
 
 ## 发布前检查清单
 
