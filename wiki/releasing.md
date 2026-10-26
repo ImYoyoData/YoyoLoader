@@ -185,6 +185,56 @@ Quit correctly
 
 受限版本上原生插件仍能加载；它调用的 API 会因能力门控返回失败，不会崩溃。
 
+## 已知问题与修复记录
+
+### Linux CI 构建失败（已修复）
+
+**症状**：Windows job 成功，Linux job 在 `Build` 步骤直接失败，没有任何编译错误输出。
+
+**根因**：脚本被以 CRLF 提交。GitHub checkout 到 Linux 后 shebang 变成
+`#!/usr/bin/env bash`，报错：
+
+```text
+/usr/bin/env: 'bash': No such file or directory
+```
+
+**修复**：新增 `.gitattributes`，按文件类型强制换行：
+
+```gitattributes
+* text=auto eol=lf
+*.sh   text eol=lf
+*.bat  text eol=crlf
+*.exe  binary
+```
+
+提交后用 `git add --renormalize .` 重新规范化索引。
+
+### 版本号在两个平台不一致（已修复）
+
+`github.ref_name` 在 tag 推送时是 `v0.1.0`，手动触发时是 `0.1.0`，导致包名不同。
+现在由独立的 `prepare` job 统一解析：剥掉 `v` 前缀，两个平台产物同名。
+
+### 编译器版本漂移（已修复）
+
+GitHub runner 上 `clang` 的主版本可能比开发环境新，新警告会改变构建行为。
+CI 现在显式安装并切换到 `clang-14` / `lld-14`，与本地验证环境一致。
+
+### 构建失败时看不到原因（已修复）
+
+`build_linux.sh` 现在会在关键命令失败时打印 `runtime build FAILED` 并立即退出，
+CI 也用 `bash -x` 输出完整命令轨迹。
+
+## 验证记录
+
+最近一次 `dev` 推送的 CI 结果：
+
+| Job | 结果 |
+|---|---|
+| `prepare` | ✅ |
+| `build-windows` | ✅ Build / Package / Upload artifact |
+| `build-linux` | ✅ Build / Package / Upload artifact |
+| `release` | ⏭ 跳过（非 tag / 未填版本） |
+
 ## 发布前检查清单
 
 - [ ] `dev` 工作区干净
