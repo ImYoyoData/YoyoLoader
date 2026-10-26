@@ -307,6 +307,80 @@ for p in Path('scripts').glob('*.sh'):
 "
 ```
 
+## 发布验证清单（每次发布必做）
+
+发布 job 显示成功**不等于**发布成功。必须逐项核对：
+
+### 1. Release 真实存在
+
+```bash
+curl -s https://api.github.com/repos/ImYoyoData/YoyoLoader/releases
+```
+
+返回 `[]` 说明没有任何 Release —— 即使 CI 全绿。用 tag 精确查询：
+
+```bash
+curl -s https://api.github.com/repos/ImYoyoData/YoyoLoader/releases/tags/v0.1.0
+```
+
+必须看到 `"draft": false` 和 4 个 assets。
+
+### 2. 四个产物齐全
+
+| 产物 | 说明 |
+|---|---|
+| `YoyoLoader-<ver>-win64.zip` | Windows 包 |
+| `YoyoLoader-<ver>-win64.zip.sha256` | 校验和 |
+| `YoyoLoader-<ver>-linux64.tar.gz` | Linux 包 |
+| `YoyoLoader-<ver>-linux64.tar.gz.sha256` | 校验和 |
+
+### 3. 校验和一致
+
+```bash
+curl -sLO https://github.com/ImYoyoData/YoyoLoader/releases/download/v0.1.0/YoyoLoader-0.1.0-win64.zip
+curl -sLO https://github.com/ImYoyoData/YoyoLoader/releases/download/v0.1.0/YoyoLoader-0.1.0-win64.zip.sha256
+sha256sum -c YoyoLoader-0.1.0-win64.zip.sha256
+```
+
+### 4. 包内容完整
+
+Windows 解压后必须包含：
+
+```text
+yoyo.exe                    (PE 文件)
+yoyo_runtime.dll            (PE 文件)
+README.txt
+plugins/home/{manifest.json,main.js}
+plugins/title/{manifest.json,main.js}
+plugins/tpa/{manifest.json,main.js}
+plugins/sample_cpp/{manifest.json,sample_cpp.dll}
+```
+
+### 5. 真实运行
+
+解压到干净 BDS 目录，直接运行 `yoyo.exe` / `./yoyo`：
+
+```text
+[INFO] version support: 1.26.52.3 (windows)
+[INFO] all features enabled for this build
+[INFO] plugin loader finished: 1 native, 3 javascript, 0 skipped
+```
+
+### v0.1.0 实际验证记录
+
+| 检查项 | 结果 |
+|---|---|
+| Release `v0.1.0` 存在，非 draft | ✅ |
+| Windows zip（758,369 字节） | ✅ |
+| Linux tar.gz（1,514,626 字节） | ✅ |
+| Windows SHA256 匹配 | ✅ |
+| Linux SHA256 匹配 | ✅ |
+| Windows 包 11 项内容齐全，2 个 PE 文件 | ✅ |
+| Linux 包 11 项内容齐全 | ✅ |
+| Windows 解压运行，1 native + 3 JS 插件 | ✅ |
+| Linux 解压运行，1 native + 3 JS 插件 | ✅ |
+| bot 连接收到 C++ 插件消息 | ✅ |
+
 ## 发布前检查清单
 
 - [ ] `dev` 工作区干净
