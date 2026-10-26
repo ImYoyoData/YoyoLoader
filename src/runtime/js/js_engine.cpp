@@ -738,14 +738,17 @@ JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int argc, JSValueCon
      * intercepting "/" chat in plugins (see plugins/*.js).
      */
     /*
-     * Measured behaviour: the packet executes the command, then BDS crashes.
-     * Keeping the packet alive forever does not help, so the crash comes from
-     * engine state the dispatcher expects after dispatch -- something we cannot
-     * reproduce from outside.  Refuse instead of killing the server.
+     * Measured on 1.26.52.3: the dispatcher returns normally, then the server
+     * crashes on a later tick.  Verified not to be the packet lifetime (an
+     * immortal packet still crashes), and not the entity id (runtime id 1 is
+     * correct).  The remaining cause is state the network layer expects to own
+     * for a command it received itself, which cannot be synthesised from
+     * outside.  Refuse rather than ship a crash.
      */
     return JS_ThrowInternalError(
         ctx,
-        "runcmd is not available: BDS crashes after a synthetically dispatched CommandRequestPacket. "
+        "runcmd is not available on this build: dispatching a synthetic CommandRequestPacket executes "
+        "but leaves the server in an invalid state and it crashes on the next tick. "
         "Use mc.regPlayerCmd for plugin commands.");
 }
 

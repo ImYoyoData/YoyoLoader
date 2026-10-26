@@ -995,8 +995,13 @@ bool packet_run_command(void* player, std::string_view command) {
     const size_t stride = native_string_size(native_abi());
     auto* payload = static_cast<unsigned char*>(raw) + kPacketBaseSize;
 
-    /* command */
-    if (!write_owned_string_at(payload, command)) {
+    /* command: the server-side parser expects the leading slash stripped,
+     * but it accepts it too; normalise to always have one. */
+    std::string normalized{command};
+    if (!normalized.empty() && normalized.front() != '/') {
+        normalized.insert(normalized.begin(), '/');
+    }
+    if (!write_owned_string_at(payload, normalized)) {
         return false;
     }
     unsigned char* cursor = payload + stride;
@@ -1013,8 +1018,26 @@ bool packet_run_command(void* player, std::string_view command) {
         return false;
     }
     cursor += stride;
-    /* origin.player_entity_id: 0 means "derive from the connection". */
-    const int64_t entity_id = 0;
+    /*
+     * CommandOrigin is a plain struct: the int64 must be 8-byte aligned, so
+     * insert padding when the string object size leaves the cursor misaligned.
+     */
+    while ((reinterpret_cast<uintptr_t>(cursor) & 7u) != 0) {
+        *cursor++ = 0;
+    }
+    /*
+     * origin.player_entity_id must be the *actor unique id* of this player's
+     * entity.  BDS dereferences this to build the command origin; leaving it 0
+     * makes the lookup fail and the server crashes right after the command
+     * runs.  This was the crash.
+     */
+    /*
+     * live_unique_id() reads an EnTT component whose hash is not stable across
+     * BDS builds; on 1.26.52.3 it returns a garbage value that makes the
+     * command origin invalid (and crashes the server afterwards).  The runtime
+     * id is the identifier the packet layer itself uses, so use that.
+     */
+    const int64_t entity_id = static_cast<int64_t>(live_runtime_id(player));
     std::memcpy(cursor, &entity_id, sizeof(entity_id));
     cursor += sizeof(entity_id);
     /* internal flag */
@@ -1044,8 +1067,10 @@ bool packet_run_command(void* player, std::string_view command) {
      * its own bookkeeping.  Hand it a separate copy so our local reset below
      * cannot drop the last reference while the server still uses it.
      */
+    log_write(LogLevel::Info, "runcmd: entity_id=%lld", static_cast<long long>(entity_id));
     std::shared_ptr<void> dispatched = packet;
     dispatcher->handle(network_id.data(), callback, &dispatched);
+    log_write(LogLevel::Info, "runcmd: dispatcher returned");
 #else
     dispatcher->handle(network_id.data(), callback, &raw);
 #endif
