@@ -149,7 +149,7 @@ chmod +x scripts/package_linux.sh
 结果：
 
 ```text
-[INFO] module: ...\_accept\winedrock_server.exe
+[INFO] module: D:\MyCode\mc\BDS\_accept\win\bedrock_server.exe
 [INFO] build id: d9f9837c2108f3824c4c44205044422e1
 [INFO] build matched an exact version profile
 [INFO] all features enabled for this build
