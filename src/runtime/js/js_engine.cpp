@@ -79,11 +79,13 @@ std::string normalize_event(std::string name) {
     if (name == "onPreJoin" || name == "pre_join") return "onPreJoin";
     if (name == "onJoin" || name == "join") return "onJoin";
     if (name == "onChat" || name == "chat") return "onChat";
-    if (name == "onLeft" || name == "left") return "onLeft";
-    if (name == "onServerReady" || name == "server_ready") return "onServerReady";
+    if (name == "onLeft" || name == "left" || name == "onexit") return "onLeft";
+    if (name == "onServerReady" || name == "server_ready" || name == "onServerStarted") {
+        return "onServerReady";
+    }
     if (name == "onTick" || name == "tick") return "onTick";
     if (name == "onPlayerMove" || name == "player_move") return "onPlayerMove";
-    if (name == "onPlayerChangeDimension" || name == "player_change_dimension" ||
+    if (name == "onChangeDim" || name == "onPlayerChangeDimension" || name == "player_change_dimension" ||
         name == "player_dimension") {
         return "onPlayerChangeDimension";
     }
@@ -131,7 +133,9 @@ std::string normalize_event(std::string name) {
     if (name == "onPlayerHealthChange" || name == "onHealthChange" || name == "health_change") {
         return "onPlayerHealthChange";
     }
-    if (name == "onPlayerDie" || name == "onDie" || name == "player_die") return "onPlayerDie";
+    if (name == "onPlayerDie" || name == "onDie" || name == "player_die" || name == "onMobDie") {
+        return "onPlayerDie";
+    }
     if (name == "onPacketSend" || name == "packet_send") return "onPacketSend";
     return name;
 }
@@ -278,12 +282,7 @@ JSValue player_send_modal_form(JSContext* ctx, JSValueConst this_val, int argc, 
 
 JSValue make_location(JSContext* ctx, const LiveVec3& position, int dimension, bool include_rotation, float pitch,
                       float yaw) {
-    JSValue object = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, object, "x", JS_NewFloat64(ctx, position.x));
-    JS_SetPropertyStr(ctx, object, "y", JS_NewFloat64(ctx, position.y));
-    JS_SetPropertyStr(ctx, object, "z", JS_NewFloat64(ctx, position.z));
-    JS_SetPropertyStr(ctx, object, "dimension", JS_NewInt32(ctx, dimension));
-    JS_SetPropertyStr(ctx, object, "dimensionName", JS_NewString(ctx, live_dimension_name(dimension)));
+    JSValue object = make_float_pos(ctx, position.x, position.y, position.z, dimension);
     if (include_rotation) {
         JS_SetPropertyStr(ctx, object, "pitch", JS_NewFloat64(ctx, pitch));
         JS_SetPropertyStr(ctx, object, "yaw", JS_NewFloat64(ctx, yaw));
@@ -297,11 +296,7 @@ JSValue player_get_position(JSContext* ctx, JSValueConst this_val, int, JSValueC
     if (handle == nullptr) return throw_no_live_player(ctx);
     LiveVec3 position;
     if (!live_get_position(handle, position)) return JS_NULL;
-    JSValue object = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, object, "x", JS_NewFloat64(ctx, position.x));
-    JS_SetPropertyStr(ctx, object, "y", JS_NewFloat64(ctx, position.y));
-    JS_SetPropertyStr(ctx, object, "z", JS_NewFloat64(ctx, position.z));
-    return object;
+    return make_float_pos(ctx, position.x, position.y, position.z, live_get_dimension(handle));
 }
 
 JSValue player_get_location(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
@@ -647,9 +642,33 @@ JSValue mc_get_online_player_num(JSContext* ctx, JSValueConst, int, JSValueConst
     return JS_NewInt32(ctx, static_cast<int32_t>(players_online().size()));
 }
 
+JSValue mc_listen(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
+
 JSValue mc_unsupported(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return unsupported(ctx, "this mc function is not implemented for the current BDS build");
 }
+
+/*
+ * Named stubs for the LLSE surface we do not implement.  A plugin migrating
+ * from LLSE gets a precise "not supported on this build" message instead of
+ * "undefined is not a function", which makes the gap visible immediately.
+ */
+JSValue mc_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_ThrowInternalError(
+        ctx, "this LegacyScriptEngine API is not implemented by YoyoLoader yet; see docs/API_COVERAGE.md");
+}
+
+/* mc.listen(EventClass) style is not supported; only string names are. */
+JSValue mc_listen_llse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc >= 2 && JS_IsString(argv[0])) {
+        return mc_listen(ctx, this_val, argc, argv);
+    }
+    return JS_ThrowTypeError(ctx,
+                             "mc.listen(name, callback) expects an event name string; "
+                             "class-based event objects are not supported");
+}
+
+
 
 JSValue mc_simulate_chat(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     if (argc < 2) {
@@ -759,9 +778,23 @@ void register_mc(JSContext* ctx) {
                       JS_NewCFunction(ctx, mc_worlds_is_controller, "isController", 0));
     JS_SetPropertyStr(ctx, worlds, "current", JS_NewCFunction(ctx, mc_worlds_current, "current", 0));
     JS_SetPropertyStr(ctx, mc, "worlds", worlds);
-    JS_SetPropertyStr(ctx, mc, "runcmd", JS_NewCFunction(ctx, mc_unsupported, "runcmd", 1));
+    JS_SetPropertyStr(ctx, mc, "runcmd", JS_NewCFunction(ctx, mc_stub, "runcmd", 1));
     JS_SetPropertyStr(ctx, mc, "runcmdEx", JS_NewCFunction(ctx, mc_unsupported, "runcmdEx", 1));
-    JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_unsupported, "getBlock", 1));
+    JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_stub, "getBlock", 1));
+    JS_SetPropertyStr(ctx, mc, "setBlock", JS_NewCFunction(ctx, mc_stub, "setBlock", 2));
+    JS_SetPropertyStr(ctx, mc, "spawnParticle", JS_NewCFunction(ctx, mc_stub, "spawnParticle", 2));
+    JS_SetPropertyStr(ctx, mc, "spawnItem", JS_NewCFunction(ctx, mc_stub, "spawnItem", 2));
+    JS_SetPropertyStr(ctx, mc, "spawnMob", JS_NewCFunction(ctx, mc_stub, "spawnMob", 2));
+    JS_SetPropertyStr(ctx, mc, "explode", JS_NewCFunction(ctx, mc_stub, "explode", 4));
+    JS_SetPropertyStr(ctx, mc, "getAllEntities", JS_NewCFunction(ctx, mc_stub, "getAllEntities", 0));
+    JS_SetPropertyStr(ctx, mc, "getEntities", JS_NewCFunction(ctx, mc_stub, "getEntities", 1));
+    JS_SetPropertyStr(ctx, mc, "getTime", JS_NewCFunction(ctx, mc_stub, "getTime", 1));
+    JS_SetPropertyStr(ctx, mc, "setTime", JS_NewCFunction(ctx, mc_stub, "setTime", 1));
+    JS_SetPropertyStr(ctx, mc, "getWeather", JS_NewCFunction(ctx, mc_stub, "getWeather", 0));
+    JS_SetPropertyStr(ctx, mc, "setWeather", JS_NewCFunction(ctx, mc_stub, "setWeather", 1));
+    JS_SetPropertyStr(ctx, mc, "getStructure", JS_NewCFunction(ctx, mc_stub, "getStructure", 2));
+    JS_SetPropertyStr(ctx, mc, "getPlayerNbt", JS_NewCFunction(ctx, mc_stub, "getPlayerNbt", 1));
+    JS_SetPropertyStr(ctx, mc, "setPlayerNbt", JS_NewCFunction(ctx, mc_stub, "setPlayerNbt", 2));
     JS_SetPropertyStr(ctx, mc, "getContainer", JS_NewCFunction(ctx, mc_unsupported, "getContainer", 1));
     JS_SetPropertyStr(ctx, mc, "getEntity", JS_NewCFunction(ctx, mc_unsupported, "getEntity", 1));
     JS_SetPropertyStr(ctx, mc, "__simulateChat",
@@ -838,6 +871,102 @@ void log_exception(JSContext* ctx) {
 
 JSValue unsupported(JSContext* ctx, const char* message) {
     return JS_ThrowInternalError(ctx, "%s", message);
+}
+
+/* LLSE sendText/tell accept an optional type (0 chat, 1 tip, 5 popup...). */
+JSValue player_send_text(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "tell(message[, type]) requires a message");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    const std::string message = to_std_string(ctx, argv[0]);
+    int32_t type = 0;
+    if (argc > 1) {
+        JS_ToInt32(ctx, &type, argv[1]);
+    }
+    LiveTextType mapped = LiveTextType::Raw;
+    switch (type) {
+    case 1: mapped = LiveTextType::Tip; break;
+    case 4: mapped = LiveTextType::SystemMessage; break;
+    case 5: mapped = LiveTextType::Popup; break;
+    default: mapped = LiveTextType::Raw; break;
+    }
+    return JS_NewBool(ctx, live_send_text(handle, message, mapped));
+}
+
+/* LLSE setTitle(content[, type[, fadeIn, stay, fadeOut]]). */
+JSValue player_set_title_llse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    const std::string content = argc > 0 ? to_std_string(ctx, argv[0]) : "";
+    int32_t type = 0;
+    int32_t fade_in = 10;
+    int32_t stay = 70;
+    int32_t fade_out = 20;
+    if (argc > 1) JS_ToInt32(ctx, &type, argv[1]);
+    if (argc > 2) JS_ToInt32(ctx, &fade_in, argv[2]);
+    if (argc > 3) JS_ToInt32(ctx, &stay, argv[3]);
+    if (argc > 4) JS_ToInt32(ctx, &fade_out, argv[4]);
+    switch (type) {
+    case 1: /* actionbar */
+        return JS_NewBool(ctx, live_send_actionbar(handle, content));
+    case 2: /* subtitle only */
+        return JS_NewBool(ctx, live_send_title(handle, "", content, fade_in, stay, fade_out));
+    default: /* 0 = title */
+        return JS_NewBool(ctx, live_send_title(handle, content, "", fade_in, stay, fade_out));
+    }
+}
+
+/* LLSE: pl.teleport(pos[, rot]) or pl.teleport(x, y, z, dimid[, rot]). */
+JSValue player_teleport_llse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (!capability_enabled(&VersionCapabilities::player_teleport)) return throw_capability(ctx, "teleport");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    if (argc < 1) return JS_ThrowTypeError(ctx, "teleport(pos) or teleport(x, y, z, dimid) requires coordinates");
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    int dimid = live_get_dimension(handle);
+    if (!read_position_args(ctx, argc, argv, x, y, z, dimid, dimid)) {
+        return JS_ThrowTypeError(ctx, "teleport requires a position object or x, y, z[, dimid]");
+    }
+    LiveVec3 position{x, y, z};
+    return JS_NewBool(ctx, live_teleport(handle, position, dimid));
+}
+
+/* LLSE has no getPosition(); it exposes pos / feetPos / blockPos properties. */
+JSValue player_get_feet_position(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "feetPos");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    LiveVec3 position;
+    if (!live_get_feet_position(handle, position)) return JS_NULL;
+    return make_float_pos(ctx, position.x, position.y, position.z, live_get_dimension(handle));
+}
+
+JSValue player_get_block_position(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "blockPos");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    LiveVec3 position;
+    if (!live_get_feet_position(handle, position)) return JS_NULL;
+    return make_int_pos(ctx, static_cast<int>(std::floor(position.x)), static_cast<int>(std::floor(position.y)),
+                        static_cast<int>(std::floor(position.z)), live_get_dimension(handle));
+}
+
+/* LLSE: pl.isOP() checks the XUID against yoyo_ops.txt. */
+JSValue player_is_op(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    JSValue xuid = JS_GetPropertyStr(ctx, this_val, "xuid");
+    const char* text = JS_ToCString(ctx, xuid);
+    const std::string value = text ? text : "";
+    if (text) JS_FreeCString(ctx, text);
+    JS_FreeValue(ctx, xuid);
+    return JS_NewBool(ctx, worlds::is_op(value));
+}
+
+/* LLSE: pl.runcmd(cmd) is not implemented; fail loudly instead of silently. */
+JSValue player_runcmd_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_ThrowInternalError(
+        ctx, "runcmd is not implemented by YoyoLoader yet (see docs/API_COVERAGE.md)");
 }
 
 JSValue player_send_form(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -940,6 +1069,62 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
     JS_SetPropertyStr(ctx, object, "get_health", JS_NewCFunction(ctx, player_get_health, "get_health", 0));
     JS_SetPropertyStr(ctx, object, "getNbt", JS_NewCFunction(ctx, player_unsupported, "getNbt", 0));
     JS_SetPropertyStr(ctx, object, "toString", JS_NewCFunction(ctx, player_to_string, "toString", 0));
+
+    /*
+     * LegacyScriptEngine surface.  These names are what existing LLSE plugins
+     * call, so they are registered alongside the YoyoLoader ones rather than
+     * replacing them.
+     */
+    JS_SetPropertyStr(ctx, object, "tell", JS_NewCFunction(ctx, player_send_text, "tell", 2));
+    JS_SetPropertyStr(ctx, object, "sendText", JS_NewCFunction(ctx, player_send_text, "sendText", 2));
+    JS_SetPropertyStr(ctx, object, "setTitle", JS_NewCFunction(ctx, player_set_title_llse, "setTitle", 5));
+    JS_SetPropertyStr(ctx, object, "getPos", JS_NewCFunction(ctx, player_get_feet_position, "getPos", 0));
+    JS_SetPropertyStr(ctx, object, "getFeetPos", JS_NewCFunction(ctx, player_get_feet_position, "getFeetPos", 0));
+    JS_SetPropertyStr(ctx, object, "getBlockPos", JS_NewCFunction(ctx, player_get_block_position, "getBlockPos", 0));
+    JS_SetPropertyStr(ctx, object, "getDirection", JS_NewCFunction(ctx, player_get_rotation, "getDirection", 0));
+    JS_SetPropertyStr(ctx, object, "isOP", JS_NewCFunction(ctx, player_is_op, "isOP", 0));
+    JS_SetPropertyStr(ctx, object, "runcmd", JS_NewCFunction(ctx, player_runcmd_stub, "runcmd", 1));
+    JS_SetPropertyStr(ctx, object, "isSneaking_llse", JS_NewCFunction(ctx, player_is_sneaking, "isSneaking", 0));
+
+    /* pos / feetPos / blockPos as properties, matching LLSE. */
+    JSValue pos_getter = JS_NewCFunction(ctx,
+                                         [](JSContext* c, JSValueConst this_val, int, JSValueConst*) -> JSValue {
+                                             void* handle = player_handle(c, this_val);
+                                             if (handle == nullptr) return JS_NULL;
+                                             LiveVec3 position;
+                                             if (!live_get_position(handle, position)) return JS_NULL;
+                                             return make_float_pos(c, position.x, position.y, position.z,
+                                                                   live_get_dimension(handle));
+                                         },
+                                         "get pos", 0);
+    JSValue feet_getter = JS_NewCFunction(ctx,
+                                          [](JSContext* c, JSValueConst this_val, int, JSValueConst*) {
+                                              return player_get_feet_position(c, this_val, 0, nullptr);
+                                          },
+                                          "get feetPos", 0);
+    JSValue block_getter = JS_NewCFunction(ctx,
+                                           [](JSContext* c, JSValueConst this_val, int, JSValueConst*) {
+                                               return player_get_block_position(c, this_val, 0, nullptr);
+                                           },
+                                           "get blockPos", 0);
+    JSValue dir_getter = JS_NewCFunction(ctx,
+                                         [](JSContext* c, JSValueConst this_val, int, JSValueConst*) -> JSValue {
+                                             void* handle = player_handle(c, this_val);
+                                             if (handle == nullptr) return JS_NULL;
+                                             float pitch = 0.0f;
+                                             float yaw = 0.0f;
+                                             if (!live_get_rotation(handle, pitch, yaw)) return JS_NULL;
+                                             return make_direction(c, pitch, yaw);
+                                         },
+                                         "get direction", 0);
+    JS_DefinePropertyGetSet(ctx, object, JS_NewAtom(ctx, "pos"), pos_getter, JS_UNDEFINED,
+                            JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, object, JS_NewAtom(ctx, "feetPos"), feet_getter, JS_UNDEFINED,
+                            JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, object, JS_NewAtom(ctx, "blockPos"), block_getter, JS_UNDEFINED,
+                            JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, object, JS_NewAtom(ctx, "direction"), dir_getter, JS_UNDEFINED,
+                            JS_PROP_ENUMERABLE);
     return object;
 }
 
@@ -978,6 +1163,7 @@ bool start() {
     log_write(LogLevel::Info, "JS registering forms");
     register_forms(g_context);
     log_write(LogLevel::Info, "JS registering timers and helpers");
+    register_llse_objects(g_context);
     register_timers(g_context);
     register_script_helpers(g_context);
     register_commands(g_context);
@@ -1170,13 +1356,7 @@ const char* detail_event_name(int type) {
 }
 
 JSValue make_position(JSContext* ctx, int x, int y, int z, int dimension) {
-    JSValue object = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, object, "x", JS_NewInt32(ctx, x));
-    JS_SetPropertyStr(ctx, object, "y", JS_NewInt32(ctx, y));
-    JS_SetPropertyStr(ctx, object, "z", JS_NewInt32(ctx, z));
-    JS_SetPropertyStr(ctx, object, "dimension", JS_NewInt32(ctx, dimension));
-    JS_SetPropertyStr(ctx, object, "dimensionName", JS_NewString(ctx, live_dimension_name(dimension)));
-    return object;
+    return make_int_pos(ctx, x, y, z, dimension);
 }
 
 } // namespace
@@ -1221,6 +1401,9 @@ void dispatch_detail(int type, const PlayerView& player, const DetailEvent& deta
     case YOYO_EVENT_ITEM_USE_ON:
     case YOYO_EVENT_BED_ENTER:
     case YOYO_EVENT_BED_LEAVE:
+        /* LLSE passes a Block object here, not a bare position. */
+        args[argc++] = make_block_object(g_context, detail.x, detail.y, detail.z, dimension);
+        break;
     case YOYO_EVENT_PLAYER_INTERACT:
     case YOYO_EVENT_PLAYER_ATTACK:
         args[argc++] = make_position(g_context, detail.x, detail.y, detail.z, dimension);

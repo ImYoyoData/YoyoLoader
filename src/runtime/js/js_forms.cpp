@@ -384,18 +384,67 @@ JSValue entity_get_pos(JSContext* ctx, JSValueConst this_val, int, JSValueConst*
     return JS_GetPropertyStr(ctx, this_val, "pos");
 }
 
+/* Read `aux`/`id`/`maxCount` style fields with defaults, matching LLSE's Item. */
+int32_t item_field_int(JSContext* ctx, JSValueConst object, const char* name, int32_t fallback) {
+    JSValue value = JS_GetPropertyStr(ctx, object, name);
+    int32_t out = fallback;
+    if (JS_IsNumber(value)) {
+        JS_ToInt32(ctx, &out, value);
+    }
+    JS_FreeValue(ctx, value);
+    return out;
+}
+
+JSValue item_clone(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    JSValue copy = JS_NewObject(ctx);
+    JSValue type = JS_GetPropertyStr(ctx, this_val, "type");
+    JSValue count = JS_GetPropertyStr(ctx, this_val, "count");
+    JSValue aux = JS_GetPropertyStr(ctx, this_val, "aux");
+    JSValue nbt = JS_GetPropertyStr(ctx, this_val, "nbt");
+    JS_SetPropertyStr(ctx, copy, "type", type);
+    JS_SetPropertyStr(ctx, copy, "count", count);
+    JS_SetPropertyStr(ctx, copy, "aux", aux);
+    JS_SetPropertyStr(ctx, copy, "nbt", nbt);
+    return copy;
+}
+
 JSValue new_item(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     JSValue object = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, object, "type", JS_NewString(ctx, argc > 0 ? text_of(ctx, argv[0]).c_str() : ""));
-    JS_SetPropertyStr(ctx, object, "count",
-                      argc > 1 ? JS_DupValue(ctx, argv[1]) : JS_NewInt32(ctx, 1));
+    const std::string type = argc > 0 ? text_of(ctx, argv[0]) : "";
+    int32_t count = 1;
+    int32_t aux = 0;
+    if (argc > 1) {
+        if (JS_IsNumber(argv[1])) {
+            JS_ToInt32(ctx, &count, argv[1]);
+        } else if (JS_IsObject(argv[1])) {
+            /* mc.newItem(nbt) or an options object. */
+            count = item_field_int(ctx, argv[1], "count", 1);
+            aux = item_field_int(ctx, argv[1], "aux", 0);
+        }
+    }
+    if (count < 1) count = 1;
+    if (count > 64) count = 64;
+    JS_SetPropertyStr(ctx, object, "type", JS_NewString(ctx, type.c_str()));
+    JS_SetPropertyStr(ctx, object, "name", JS_NewString(ctx, type.c_str()));
+    JS_SetPropertyStr(ctx, object, "id", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, object, "count", JS_NewInt32(ctx, count));
+    JS_SetPropertyStr(ctx, object, "maxCount", JS_NewInt32(ctx, 64));
+    JS_SetPropertyStr(ctx, object, "aux", JS_NewInt32(ctx, aux));
+    JS_SetPropertyStr(ctx, object, "damage", JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, object, "nbt", argc > 2 ? JS_DupValue(ctx, argv[2]) : JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, object, "isNull", JS_NewCFunction(ctx, item_is_null, "isNull", 0));
+    JS_SetPropertyStr(ctx, object, "clone", JS_NewCFunction(ctx, item_clone, "clone", 0));
+    JS_SetPropertyStr(ctx, object, "setNull", JS_NewCFunction(ctx, set_nbt, "setNull", 1));
+    JS_SetPropertyStr(ctx, object, "setAux", JS_NewCFunction(ctx, set_count, "setAux", 1));
+    JS_SetPropertyStr(ctx, object, "setCount", JS_NewCFunction(ctx, set_count, "setCount", 1));
+    JS_SetPropertyStr(ctx, object, "addCount", JS_NewCFunction(ctx, set_count, "addCount", 1));
+    JS_SetPropertyStr(ctx, object, "getNbt", JS_NewCFunction(ctx, get_nbt, "getNbt", 0));
+    JS_SetPropertyStr(ctx, object, "getNBT", JS_NewCFunction(ctx, get_nbt, "getNBT", 0));
+    JS_SetPropertyStr(ctx, object, "setNbt", JS_NewCFunction(ctx, set_nbt, "setNbt", 1));
+    JS_SetPropertyStr(ctx, object, "setNBT", JS_NewCFunction(ctx, set_nbt, "setNBT", 1));
+    /* YoyoLoader-era getters kept for existing plugins. */
     JS_SetPropertyStr(ctx, object, "getType", JS_NewCFunction(ctx, get_type, "getType", 0));
     JS_SetPropertyStr(ctx, object, "getCount", JS_NewCFunction(ctx, get_count, "getCount", 0));
-    JS_SetPropertyStr(ctx, object, "setCount", JS_NewCFunction(ctx, set_count, "setCount", 1));
-    JS_SetPropertyStr(ctx, object, "getNBT", JS_NewCFunction(ctx, get_nbt, "getNBT", 0));
-    JS_SetPropertyStr(ctx, object, "setNBT", JS_NewCFunction(ctx, set_nbt, "setNBT", 1));
-    JS_SetPropertyStr(ctx, object, "isNull", JS_NewCFunction(ctx, item_is_null, "isNull", 0));
     JS_SetPropertyStr(ctx, object, "getMaxStackSize",
                       JS_NewCFunction(ctx, item_max_stack, "getMaxStackSize", 0));
     return object;
@@ -403,12 +452,19 @@ JSValue new_item(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
 
 JSValue new_block(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     JSValue object = JS_NewObject(ctx);
+    const std::string type = argc > 1 ? text_of(ctx, argv[1]) : "";
     JS_SetPropertyStr(ctx, object, "pos", argc > 0 ? JS_DupValue(ctx, argv[0]) : JS_NULL);
-    JS_SetPropertyStr(ctx, object, "type", JS_NewString(ctx, argc > 1 ? text_of(ctx, argv[1]).c_str() : ""));
+    JS_SetPropertyStr(ctx, object, "name", JS_NewString(ctx, type.c_str()));
+    JS_SetPropertyStr(ctx, object, "type", JS_NewString(ctx, type.c_str()));
+    JS_SetPropertyStr(ctx, object, "id", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, object, "tileData", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, object, "isAir", JS_NewBool(ctx, type == "minecraft:air" || type.empty()));
     JS_SetPropertyStr(ctx, object, "nbt", argc > 2 ? JS_DupValue(ctx, argv[2]) : JS_NewObject(ctx));
     JS_SetPropertyStr(ctx, object, "getType", JS_NewCFunction(ctx, get_type, "getType", 0));
     JS_SetPropertyStr(ctx, object, "getPos", JS_NewCFunction(ctx, block_get_pos, "getPos", 0));
+    JS_SetPropertyStr(ctx, object, "getNbt", JS_NewCFunction(ctx, get_nbt, "getNbt", 0));
     JS_SetPropertyStr(ctx, object, "getNBT", JS_NewCFunction(ctx, get_nbt, "getNBT", 0));
+    JS_SetPropertyStr(ctx, object, "setNbt", JS_NewCFunction(ctx, set_nbt, "setNbt", 1));
     JS_SetPropertyStr(ctx, object, "setNBT", JS_NewCFunction(ctx, set_nbt, "setNBT", 1));
     return object;
 }

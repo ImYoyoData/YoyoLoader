@@ -40,6 +40,7 @@ set(YOYO_RUNTIME_SOURCES
     src/runtime/js/js_forms.cpp
     src/runtime/js/js_timers.cpp
     src/runtime/js/js_script.cpp
+    src/runtime/js/js_compat.cpp
     src/runtime/js/js_commands.cpp
     ${YOYO_QUICKJS_SOURCES}
 )
