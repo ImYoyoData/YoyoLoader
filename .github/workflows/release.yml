@@ -1,9 +1,8 @@
 name: build-and-release
 
-# Two jobs:
-#   build   - compile both platforms, upload the packaged archives as artifacts
-#   release - only on a version tag or a manual run with a version, creates the
-#             GitHub Release and attaches both archives plus their checksums
+# build   - compile both platforms and upload the packaged archives
+# release - on a version tag or a manual run with a version, create the GitHub
+#           Release and attach both archives plus their checksums
 on:
   push:
     branches: [main, dev]
@@ -40,7 +39,6 @@ jobs:
           else
             RAW=""
           fi
-          # Normalise: strip a leading v so file names stay YoyoLoader-<ver>-<platform>.
           VERSION="${RAW#v}"
           if [[ -z "$VERSION" ]]; then
             VERSION="dev-${GITHUB_SHA::7}"
@@ -75,19 +73,36 @@ jobs:
       - name: Verify archive contents
         shell: pwsh
         run: |
-          $zip = Get-ChildItem dist/*.zip | Select-Object -First 1
-          $names = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName).Entries.FullName
-          $required = @('yoyo.exe','yoyo_runtime.dll','README.txt',
-                        'plugins/home/manifest.json','plugins/home/main.js',
-                        'plugins/title/manifest.json','plugins/tpa/manifest.json',
-                        'plugins/sample_cpp/manifest.json')
-          $missing = $required | Where-Object { $names -notcontains $_ }
-          if ($missing) {
+          $zip = (Get-ChildItem dist/*.zip | Select-Object -First 1).FullName
+          $tmp = Join-Path $env:RUNNER_TEMP "verify-win"
+          if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+          Expand-Archive -Path $zip -DestinationPath $tmp -Force
+          $required = @(
+            'yoyo.exe',
+            'yoyo_runtime.dll',
+            'README.txt',
+            'plugins/home/manifest.json',
+            'plugins/home/main.js',
+            'plugins/title/manifest.json',
+            'plugins/title/main.js',
+            'plugins/tpa/manifest.json',
+            'plugins/tpa/main.js',
+            'plugins/sample_cpp/manifest.json',
+            'plugins/sample_cpp/sample_cpp.dll'
+          )
+          $missing = @()
+          foreach ($rel in $required) {
+            $full = Join-Path $tmp $rel
+            if (-not (Test-Path $full)) { $missing += $rel }
+          }
+          if ($missing.Count -gt 0) {
             Write-Error "archive is missing: $($missing -join ', ')"
             exit 1
           }
-          Write-Host "archive OK: $($names.Count) entries"
-          $names | Sort-Object
+          Write-Host "archive OK ($($required.Count) required entries)"
+          Get-ChildItem -Recurse -File $tmp | ForEach-Object {
+            $_.FullName.Substring($tmp.Length + 1)
+          } | Sort-Object
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -107,8 +122,8 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          # Pin the same major version the project is developed against; a newer
-          # clang on the runner turns new warnings into build differences.
+          # Pin the major version the project is developed against; a newer clang
+          # on the runner changes which warnings appear.
           sudo apt-get install -y clang-14 lld-14
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
@@ -118,11 +133,7 @@ jobs:
         env:
           CXX: clang++
           CC: clang
-        run: |
-          set -x
-          clang++ --version
-          clang --version
-          bash -x scripts/build_linux.sh 2>&1 | tail -80
+        run: scripts/build_linux.sh
 
       - name: Package
         run: |
@@ -131,27 +142,33 @@ jobs:
 
       - name: Verify archive contents
         run: |
-          set -e
+          set -euo pipefail
           ARCHIVE=$(ls dist/*.tar.gz | head -1)
           echo "checking $ARCHIVE"
           LIST=$(tar -tzf "$ARCHIVE" | sed 's|^\./||' | sort)
+          MISSING=""
           REQUIRED="yoyo
           libyoyo_runtime.so
           README.txt
           plugins/home/manifest.json
           plugins/home/main.js
           plugins/title/manifest.json
-          plugins/tpa/manifest.json"
-          MISSING=""
+          plugins/title/main.js
+          plugins/tpa/manifest.json
+          plugins/tpa/main.js
+          plugins/sample_cpp/manifest.json
+          plugins/sample_cpp/sample_cpp.so"
           for f in $REQUIRED; do
-            if ! echo "$LIST" | grep -qx "$f"; then MISSING="$MISSING $f"; fi
+            if ! printf '%s\n' "$LIST" | grep -qx "$f"; then
+              MISSING="$MISSING $f"
+            fi
           done
           if [ -n "$MISSING" ]; then
             echo "archive is missing:$MISSING"
             exit 1
           fi
           echo "archive OK"
-          echo "$LIST"
+          printf '%s\n' "$LIST"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
