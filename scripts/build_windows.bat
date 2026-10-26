@@ -41,6 +41,7 @@ cl %COMMON% /DYOYO_PLATFORM_WINDOWS=1 /DYOYO_RUNTIME_BUILD=1 /Iinclude /Isrc\run
     src\runtime\worlds.cpp ^
     src\runtime\events.cpp ^
     src\runtime\plugin_loader.cpp ^
+    src\runtime\plugin_manifest.cpp ^
     src\runtime\players.cpp ^
     src\runtime\nbt\nbt.cpp ^
     src\runtime\js\js_engine.cpp ^

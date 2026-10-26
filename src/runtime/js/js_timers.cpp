@@ -18,6 +18,7 @@ struct Timer {
     uint64_t interval_ms = 0;
     bool repeating = false;
     JSValue callback = JS_UNDEFINED;
+    JSContext* ctx = nullptr; /* owning plugin context */
     std::string code;
 };
 
@@ -79,6 +80,7 @@ JSValue timer_create(JSContext* ctx, int argc, JSValueConst* argv, bool repeatin
     timer.repeating = repeating;
     timer.code = std::move(code);
     timer.callback = is_function ? JS_DupValue(ctx, argv[0]) : JS_UNDEFINED;
+    timer.ctx = ctx;
     timers()[id] = std::move(timer);
     return JS_NewInt64(ctx, static_cast<int64_t>(id));
 }
@@ -104,8 +106,8 @@ JSValue timer_clear(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
         std::lock_guard lock(timer_mutex());
         auto it = timers().find(static_cast<uint64_t>(id));
         if (it != timers().end()) {
-            if (JS_IsFunction(ctx, it->second.callback)) {
-                JS_FreeValue(ctx, it->second.callback);
+            if (it->second.ctx != nullptr && JS_IsFunction(it->second.ctx, it->second.callback)) {
+                JS_FreeValue(it->second.ctx, it->second.callback);
             }
             timers().erase(it);
             removed = true;
@@ -135,6 +137,7 @@ void run_timers() {
     struct Fire {
         uint64_t id = 0;
         JSValue callback = JS_UNDEFINED;
+        JSContext* ctx = nullptr;
         std::string code;
     };
     std::vector<Fire> due;
@@ -146,7 +149,8 @@ void run_timers() {
             if (timer.due_ms > now) {
                 continue;
             }
-            due.push_back({id, JS_DupValue(g_context, timer.callback), timer.code});
+            due.push_back({id, timer.ctx != nullptr ? JS_DupValue(timer.ctx, timer.callback) : JS_UNDEFINED,
+                           timer.ctx, timer.code});
             if (timer.repeating) {
                 timer.due_ms = now + std::max<uint64_t>(timer.interval_ms, 1);
             } else {
@@ -158,39 +162,42 @@ void run_timers() {
         for (const uint64_t id : finished) {
             auto it = timers().find(id);
             if (it != timers().end()) {
-                if (JS_IsFunction(g_context, it->second.callback)) {
-                    JS_FreeValue(g_context, it->second.callback);
+                if (it->second.ctx != nullptr && JS_IsFunction(it->second.ctx, it->second.callback)) {
+                    JS_FreeValue(it->second.ctx, it->second.callback);
                 }
                 timers().erase(it);
             }
         }
     }
     for (auto& fire : due) {
-        if (JS_IsFunction(g_context, fire.callback)) {
-            JSValue result = JS_Call(g_context, fire.callback, JS_UNDEFINED, 0, nullptr);
+        JSContext* ctx = fire.ctx != nullptr ? fire.ctx : g_context;
+        if (ctx == nullptr) {
+            continue;
+        }
+        if (JS_IsFunction(ctx, fire.callback)) {
+            
+            JSValue result = JS_Call(ctx, fire.callback, JS_UNDEFINED, 0, nullptr);
             if (JS_IsException(result)) {
-                log_exception(g_context);
+                log_exception(ctx);
             }
-            JS_FreeValue(g_context, result);
+            JS_FreeValue(ctx, result);
         } else if (!fire.code.empty()) {
-            JSValue result = JS_Eval(g_context, fire.code.data(), fire.code.size(), "<timer>",
+            JSValue result = JS_Eval(ctx, fire.code.data(), fire.code.size(), "<timer>",
                                      JS_EVAL_TYPE_GLOBAL);
             if (JS_IsException(result)) {
-                log_exception(g_context);
+                log_exception(ctx);
             }
-            JS_FreeValue(g_context, result);
+            JS_FreeValue(ctx, result);
         }
-        JS_FreeValue(g_context, fire.callback);
+        JS_FreeValue(ctx, fire.callback);
     }
 }
 
 void clear_timers() {
     std::lock_guard lock(timer_mutex());
-    if (g_context != nullptr) {
-        for (auto& [id, timer] : timers()) {
-            if (JS_IsFunction(g_context, timer.callback)) {
-                JS_FreeValue(g_context, timer.callback);
-            }
+    for (auto& [id, timer] : timers()) {
+        if (timer.ctx != nullptr && JS_IsFunction(timer.ctx, timer.callback)) {
+            JS_FreeValue(timer.ctx, timer.callback);
         }
     }
     timers().clear();

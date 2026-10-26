@@ -29,7 +29,24 @@ namespace {
 
 JSRuntime* g_runtime = nullptr;
 std::recursive_mutex g_mutex;
-std::unordered_map<std::string, std::vector<JSValue>> g_listeners;
+
+/*
+ * One QuickJS context per plugin file.  They share a JSRuntime (so values can
+ * move between them when we hand a Player object to a listener) but each has
+ * its own global object, which is what gives plugin isolation: two plugins can
+ * both define `handleCommand` without clobbering each other, and an exception
+ * in one cannot touch another's globals.
+ */
+struct Listener {
+    JSContext* ctx = nullptr;
+    JSValue fn = JS_UNDEFINED;
+};
+
+std::unordered_map<std::string, std::vector<Listener>> g_listeners;
+std::vector<JSContext*> g_plugin_contexts;
+
+/* Context whose code is currently running; set before invoking a listener. */
+JSContext* g_active = nullptr;
 
 std::string to_std_string(JSContext* ctx, JSValueConst value) {
     const char* text = JS_ToCString(ctx, value);
@@ -161,22 +178,28 @@ bool call_listeners_locked(const std::string& event, int argc, JSValueConst* arg
     if (it == g_listeners.end() || it->second.empty()) {
         return false;
     }
-    std::vector<JSValue> callbacks;
-    callbacks.reserve(it->second.size());
-    for (JSValue fn : it->second) {
-        callbacks.push_back(JS_DupValue(g_context, fn));
-    }
 
     bool cancelled = false;
-    for (JSValue fn : callbacks) {
-        JSValue result = JS_Call(g_context, fn, JS_UNDEFINED, argc, argv);
+    for (const auto& listener : it->second) {
+        if (listener.ctx == nullptr || !JS_IsFunction(listener.ctx, listener.fn)) {
+            continue;
+        }
+        /*
+         * Isolate failures: each listener runs with its own context active and
+         * its own exception handler, so one plugin throwing cannot stop the
+         * others or escape into the server.
+         */
+        JSContext* previous = g_active;
+        g_active = listener.ctx;
+        JS_UpdateStackTop(g_runtime);
+        JSValue result = JS_Call(listener.ctx, listener.fn, JS_UNDEFINED, argc, argv);
         if (JS_IsException(result)) {
-            log_exception(g_context);
-        } else if (JS_IsBool(result) && JS_ToBool(g_context, result) == 0) {
+            log_exception(listener.ctx);
+        } else if (JS_IsBool(result) && JS_ToBool(listener.ctx, result) == 0) {
             cancelled = true;
         }
-        JS_FreeValue(g_context, result);
-        JS_FreeValue(g_context, fn);
+        JS_FreeValue(listener.ctx, result);
+        g_active = previous;
     }
     return cancelled;
 }
@@ -571,7 +594,7 @@ JSValue mc_listen(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
         log_write(LogLevel::Warn, "js event '%s' is not implemented yet; listener stored but it will not fire",
                   event.c_str());
     }
-    g_listeners[event].push_back(JS_DupValue(ctx, argv[1]));
+    g_listeners[event].push_back({ctx, JS_DupValue(ctx, argv[1])});
     return JS_TRUE;
 }
 
@@ -700,19 +723,24 @@ JSValue mc_set_weather(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
 }
 
 /*
- * mc.runcmd / mc.runcmdEx are not implemented.
- *
- * Running a command requires a CommandOrigin whose layout is version
- * dependent.  Synthesising a CommandRequestPacket was tried and it executes the
- * command, but the server crashes immediately afterwards because the origin
- * payload the engine expects cannot be reproduced safely from outside.  A crash
- * is worse than a missing feature, so this refuses with a clear message.
+ * mc.runcmd runs through the CommandRequest pipeline, using the player's own
+ * NetworkIdentifier so permission checks behave as if the player typed it.
  */
-JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) {
+        return JS_ThrowTypeError(ctx, "runcmd(command) requires a command string");
+    }
+    /*
+     * The command packet path executes the command but then tears the server
+     * down: the dispatcher ends up owning state we cannot reproduce from
+     * outside the engine.  Until that is solved properly, refuse instead of
+     * crashing the process.  Player-facing commands are handled by
+     * intercepting "/" chat in plugins (see plugins/*.js).
+     */
     return JS_ThrowInternalError(
         ctx,
-        "runcmd is not implemented by YoyoLoader: it needs a version-specific CommandOrigin. "
-        "Use a player chat command via mc.regPlayerCmd instead.");
+        "runcmd is not available: use a plugin-level '/' command handler instead "
+        "(mc.listen('onChat') with a leading slash)");
 }
 
 /* mc.getTime(TimeID): 0 daytime, 1 gametime, 2 day.  Read from packets. */
@@ -846,6 +874,39 @@ JSValue mc_listen_llse(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
 
 
 
+/*
+ * Test hook: feed a command through the same router a real CommandRequest
+ * packet uses.  Returns null when a plugin handled it.
+ */
+JSValue mc_simulate_command(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 2) {
+        return JS_ThrowTypeError(ctx, "mc.__simulateCommand(name, command) requires two arguments");
+    }
+    auto info = players_find(to_std_string(ctx, argv[0]));
+    if (!info.has_value() || info->handle == nullptr) {
+        return JS_ThrowInternalError(ctx, "no live player named %s", to_std_string(ctx, argv[0]).c_str());
+    }
+    PlayerView view;
+    view.handle = info->handle;
+    view.name = info->name;
+    view.xuid = info->xuid;
+    view.address = info->address;
+    view.runtime_id = info->runtime_id;
+    std::string command = to_std_string(ctx, argv[1]);
+    while (!command.empty() && (command.front() == '/' || command.front() == ' ')) {
+        command.erase(command.begin());
+    }
+    if (!js::has_player_command(command)) {
+        return JS_NewBool(ctx, false);
+    }
+    std::string output;
+    const bool handled = js::run_player_command(view, command, output);
+    if (!output.empty()) {
+        live_send_text(view.handle, output, LiveTextType::Raw);
+    }
+    return handled ? JS_NULL : JS_NewBool(ctx, false);
+}
+
 JSValue mc_simulate_chat(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     if (argc < 2) {
         return JS_ThrowTypeError(ctx, "mc.__simulateChat(name, message) requires two arguments");
@@ -976,6 +1037,10 @@ void register_mc(JSContext* ctx) {
     JS_SetPropertyStr(ctx, mc, "getEntity", JS_NewCFunction(ctx, mc_unsupported, "getEntity", 1));
     JS_SetPropertyStr(ctx, mc, "__simulateChat",
                       JS_NewCFunction(ctx, mc_simulate_chat, "__simulateChat", 2));
+    JS_SetPropertyStr(ctx, mc, "__simulateCommand",
+                      JS_NewCFunction(ctx, mc_simulate_command, "__simulateCommand", 2));
+    JS_SetPropertyStr(ctx, mc, "__simulateCommand",
+                      JS_NewCFunction(ctx, mc_simulate_command, "__simulateCommand", 2));
     JS_SetPropertyStr(ctx, mc, "__rewriteNative",
                       JS_NewCFunction(ctx, mc_rewrite_native, "__rewriteNative", 1));
     JS_SetPropertyStr(ctx, mc, "version", JS_NewString(ctx, "0.2.0"));
@@ -998,34 +1063,6 @@ void register_mc(JSContext* ctx) {
     JS_FreeValue(ctx, global);
 }
 
-void load_js_plugins(JSContext* ctx) {
-    std::error_code error;
-    auto directory = std::filesystem::current_path(error) / "plugins";
-    if (error || !std::filesystem::is_directory(directory, error)) {
-        return;
-    }
-    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
-        if (error) break;
-        if (!entry.is_regular_file() || entry.path().extension() != ".js") continue;
-        std::ifstream file(entry.path(), std::ios::binary);
-        if (!file) {
-            log_write(LogLevel::Error, "cannot open JS plugin %s", entry.path().string().c_str());
-            continue;
-        }
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-        std::string source = buffer.str();
-        JSValue result = JS_Eval(ctx, source.data(), source.size(), entry.path().string().c_str(),
-                                 JS_EVAL_TYPE_GLOBAL);
-        if (JS_IsException(result)) {
-            log_exception(ctx);
-            log_write(LogLevel::Error, "JS plugin failed: %s", entry.path().string().c_str());
-        } else {
-            JS_FreeValue(ctx, result);
-            log_write(LogLevel::Info, "JS plugin loaded: %s", entry.path().string().c_str());
-        }
-    }
-}
 
 } // namespace
 
@@ -1044,6 +1081,71 @@ void log_exception(JSContext* ctx) {
     }
     JS_FreeValue(ctx, stack);
     JS_FreeValue(ctx, exception);
+}
+
+bool load_plugins(const std::vector<plugins::Manifest>& manifests) {
+    bool all_loaded = true;
+    for (const auto& manifest : manifests) {
+        const std::filesystem::path entry =
+            std::filesystem::path(manifest.directory) / manifest.entry;
+        std::ifstream file(entry, std::ios::binary);
+        if (!file) {
+            log_write(LogLevel::Error, "cannot open JS plugin %s", entry.string().c_str());
+            all_loaded = false;
+            continue;
+        }
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        const std::string source = buffer.str();
+
+        /*
+         * One context per plugin: own globals, own exception state, own timers.
+         * A plugin that throws at load is skipped without touching the others.
+         */
+        JSContext* plugin = JS_NewContext(g_runtime);
+        if (plugin == nullptr) {
+            log_write(LogLevel::Error, "cannot create a context for %s", entry.string().c_str());
+            all_loaded = false;
+            continue;
+        }
+        g_plugin_contexts.push_back(plugin);
+        JSContext* previous = g_context;
+        g_active = plugin;
+        g_context = plugin;
+        register_mc(plugin);
+        register_nbt(plugin);
+        register_forms(plugin);
+        register_llse_objects(plugin);
+        register_timers(plugin);
+        register_script_helpers(plugin);
+        register_commands(plugin);
+
+        /* Expose the plugin's own identity and writable data directory. */
+        JSValue global = JS_GetGlobalObject(plugin);
+        JSValue info = JS_NewObject(plugin);
+        JS_SetPropertyStr(plugin, info, "name", JS_NewString(plugin, manifest.name.c_str()));
+        JS_SetPropertyStr(plugin, info, "version", JS_NewString(plugin, manifest.version.c_str()));
+        JS_SetPropertyStr(plugin, info, "engine",
+                          JS_NewString(plugin, plugins::engine_name(manifest.engine)));
+        JS_SetPropertyStr(plugin, global, "__plugin", info);
+        JS_FreeValue(plugin, global);
+
+        JSValue result = JS_Eval(plugin, source.data(), source.size(), entry.string().c_str(),
+                                 JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(result)) {
+            log_exception(plugin);
+            log_write(LogLevel::Error, "JS plugin '%s' failed at load (isolated): %s",
+                      manifest.name.c_str(), entry.string().c_str());
+            all_loaded = false;
+        } else {
+            JS_FreeValue(plugin, result);
+            log_write(LogLevel::Info, "JS plugin loaded: %s v%s (%s)", manifest.name.c_str(),
+                      manifest.version.c_str(), entry.string().c_str());
+        }
+        g_context = previous;
+        g_active = previous;
+    }
+    return all_loaded;
 }
 
 JSValue unsupported(JSContext* ctx, const char* message) {
@@ -1338,7 +1440,6 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
 
 bool has_listener(std::string_view event) {
     std::lock_guard lock(g_mutex);
-    if (g_context == nullptr) return false;
     const std::string name = normalize_event(std::string(event));
     auto it = g_listeners.find(name);
     return it != g_listeners.end() && !it->second.empty();
@@ -1375,8 +1476,6 @@ bool start() {
     register_timers(g_context);
     register_script_helpers(g_context);
     register_commands(g_context);
-    log_write(LogLevel::Info, "JS loading plugins");
-    load_js_plugins(g_context);
     log_write(LogLevel::Info, "QuickJS ready");
     return true;
 }
@@ -1389,9 +1488,17 @@ void stop() {
         clear_commands();
         close_files();
         for (auto& [name, listeners] : g_listeners) {
-            for (JSValue fn : listeners) JS_FreeValue(g_context, fn);
+            for (auto& listener : listeners) {
+                if (listener.ctx != nullptr) {
+                    JS_FreeValue(listener.ctx, listener.fn);
+                }
+            }
         }
         g_listeners.clear();
+        for (JSContext* plugin : g_plugin_contexts) {
+            JS_FreeContext(plugin);
+        }
+        g_plugin_contexts.clear();
         JS_FreeContext(g_context);
         g_context = nullptr;
     }

@@ -16,7 +16,8 @@ namespace {
 struct CommandEntry {
     std::string description;
     JSValue callback = JS_UNDEFINED;
-    int32_t permission = 0; /* 0 = any player, >0 = OP only */
+    JSContext* ctx = nullptr; /* owning plugin context */
+    int32_t permission = 0;   /* 0 = any player, >0 = OP only */
 };
 
 std::mutex& command_mutex() {
@@ -129,11 +130,11 @@ void register_commands(JSContext* ctx) {
                                           if (it != commands.end()) {
                                               JS_FreeValue(c, it->second.callback);
                                               it->second.callback = callback;
+                                              it->second.ctx = c;
                                               it->second.description = value_to_text(c, argv[1]);
                                               it->second.permission = permission;
                                           } else {
-                                              commands[name] = CommandEntry{value_to_text(c, argv[1]),
-                                                                            callback, permission};
+                                              commands[name] = CommandEntry{value_to_text(c, argv[1]), callback, c, permission};
                                           }
                                           return JS_TRUE;
                                       },
@@ -156,10 +157,10 @@ void register_commands(JSContext* ctx) {
                                           if (it != commands.end()) {
                                               JS_FreeValue(c, it->second.callback);
                                               it->second.callback = callback;
+                                              it->second.ctx = c;
                                               it->second.description = value_to_text(c, argv[1]);
                                           } else {
-                                              commands[name] = CommandEntry{value_to_text(c, argv[1]),
-                                                                            callback, 0};
+                                              commands[name] = CommandEntry{value_to_text(c, argv[1]), callback, c, 0};
                                           }
                                           return JS_TRUE;
                                       },
@@ -200,39 +201,44 @@ bool run_player_command(const PlayerView& player, const std::string& message, st
         return false;
     }
     JSValue callback = JS_UNDEFINED;
+    JSContext* owner = nullptr;
     int32_t permission = 0;
     {
         std::lock_guard lock(command_mutex());
         auto& commands = player_commands();
         auto it = commands.find(name);
-        if (it == commands.end()) {
+        if (it == commands.end() || it->second.ctx == nullptr) {
             return false;
         }
-        callback = JS_DupValue(g_context, it->second.callback);
+        owner = it->second.ctx;
+        callback = JS_DupValue(owner, it->second.callback);
         permission = it->second.permission;
     }
+    if (owner == nullptr) {
+        return false;
+    }
     if (!player_has_permission(player, permission)) {
-        JS_FreeValue(g_context, callback);
+        JS_FreeValue(owner, callback);
         output = "§cYou do not have permission to run this command";
         return true;
     }
 
     const std::string args = command_args(message);
-    JSValue js_player = make_player(g_context, player);
-    JSValue js_args = JS_NewStringLen(g_context, args.data(), args.size());
-    JSValue js_output = make_output(g_context);
+    JSValue js_player = make_player(owner, player);
+    JSValue js_args = JS_NewStringLen(owner, args.data(), args.size());
+    JSValue js_output = make_output(owner);
     JSValue call_args[3] = {js_player, js_args, js_output};
-    JSValue result = JS_Call(g_context, callback, JS_UNDEFINED, 3, call_args);
+    JSValue result = JS_Call(owner, callback, JS_UNDEFINED, 3, call_args);
     if (JS_IsException(result)) {
-        log_exception(g_context);
+        log_exception(owner);
     } else if (JS_IsString(result)) {
-        output = value_to_text(g_context, result);
+        output = value_to_text(owner, result);
     }
-    JS_FreeValue(g_context, result);
-    JS_FreeValue(g_context, js_player);
-    JS_FreeValue(g_context, js_args);
-    JS_FreeValue(g_context, js_output);
-    JS_FreeValue(g_context, callback);
+    JS_FreeValue(owner, result);
+    JS_FreeValue(owner, js_player);
+    JS_FreeValue(owner, js_args);
+    JS_FreeValue(owner, js_output);
+    JS_FreeValue(owner, callback);
     return true;
 }
 

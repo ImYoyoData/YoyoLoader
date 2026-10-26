@@ -33,6 +33,7 @@ set(YOYO_RUNTIME_SOURCES
     src/runtime/worlds.cpp
     src/runtime/events.cpp
     src/runtime/plugin_loader.cpp
+    src/runtime/plugin_manifest.cpp
     src/runtime/players.cpp
     src/runtime/nbt/nbt.cpp
     src/runtime/js/js_engine.cpp

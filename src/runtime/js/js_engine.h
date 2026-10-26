@@ -3,6 +3,9 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
+
+#include "../plugin_manifest.h"
 
 namespace yoyo {
 struct PlayerView;
@@ -14,6 +17,12 @@ namespace yoyo::js {
 
 bool start();
 void stop();
+
+/*
+ * Load already-ordered JS plugins, each in its own QuickJS context.
+ * Returns false when any plugin threw at load time (the rest still load).
+ */
+bool load_plugins(const std::vector<plugins::Manifest>& manifests);
 bool has_listener(std::string_view event);
 
 void dispatch_pre_join(const PlayerView& player, bool& cancelled);

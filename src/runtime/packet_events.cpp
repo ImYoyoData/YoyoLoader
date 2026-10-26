@@ -552,9 +552,27 @@ void handle_form_response(void* packet, PlayerView& player, bool& cancelled) {
 
 void handle_command(void* packet, PlayerView& player, bool& cancelled) {
     const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    std::string command = read_string_at(payload, 0);
+
+    /*
+     * Intercept before BDS parses it.  A plugin command is fully handled here
+     * and the packet is dropped, so the vanilla command dispatcher never sees
+     * an unknown command.  Unregistered commands fall through untouched.
+     */
+    if (player.handle != nullptr && !command.empty() && js::has_player_command(command)) {
+        std::string output;
+        if (js::run_player_command(player, command, output)) {
+            if (!output.empty()) {
+                live_send_text(player.handle, output, LiveTextType::Raw);
+            }
+            cancelled = true;
+        }
+        return;
+    }
+
     DetailEvent detail;
     detail.packet_id = kPacketCommandRequest;
-    detail.text = read_string_at(payload, 0);
+    detail.text = command;
     if (emit_detail(YOYO_EVENT_PLAYER_COMMAND, player, detail)) {
         cancelled = true;
     }
@@ -592,6 +610,9 @@ void handle_respawn(void* packet, PlayerView& player) {
 }
 
 bool WrappedPacketHandler::dispatch_packet(int packet_id, void* packet, PlayerView& player) {
+    if (std::getenv("YOYO_DEBUG_CMD") != nullptr) {
+        log_write(LogLevel::Info, "dispatch_packet: id=%d player=%p", packet_id, player.handle);
+    }
     if (packet == nullptr) {
         return false;
     }
@@ -827,6 +848,9 @@ void wrap_packet(void* packet, int packet_id) {
     wrapper.packet_id = packet_id;
     wrapper.original = reinterpret_cast<const PacketDispatcher*>(handler);
     *handler_slot = &wrapper;
+    if (std::getenv("YOYO_DEBUG_WRAP") != nullptr) {
+        log_write(LogLevel::Info, "wrap_packet: id=%d handler=%p", packet_id, handler);
+    }
 }
 
 #ifdef _WIN32
@@ -847,6 +871,24 @@ void create_packet_detour(void* output, int packet_id) {
 
 
 } // namespace
+
+
+/*
+ * CommandRequestPacket layout (verified against the 1.26.x protocol schema):
+ *
+ *   std::string command            (varint length + bytes)
+ *   CommandOrigin origin:
+ *       std::string type           ("player")
+ *       mce::UUID uuid             (16 bytes)
+ *       std::string request_id
+ *       int64 player_entity_id
+ *   bool internal
+ *   std::string version            ("1")
+ *
+ * The command string is a native std::string, but the origin strings are
+ * *wire* strings (varint-prefixed), which is why the earlier attempt crashed:
+ * it wrote native strings there and the engine read garbage.
+ */
 
 /* Write a native std::string into a freshly created packet field. */
 bool write_owned_string_at(void* address, std::string_view value) {
@@ -895,6 +937,120 @@ bool write_owned_string_at(void* address, std::string_view value) {
             std::memcpy(base + 16, &data, sizeof(data));
         }
     }
+    return true;
+}
+
+/*
+ * Execute a command server-side.
+ *
+ * Rather than call an internal command entry point (whose signature changes
+ * every build), this builds a CommandRequestPacket with the same in-memory
+ * layout the server's own packet reader produces and hands it to the packet
+ * dispatcher it already uses for client packets.  The layout is:
+ *
+ *   std::string  command
+ *   struct origin { std::string type; uint8 uuid[16]; std::string request_id;
+ *                   int64 player_entity_id; }
+ *   bool   internal
+ *   std::string version
+ *
+ * Every string is a native std::string; only serialisation uses the wire
+ * format.  Getting this wrong is what crashed the earlier attempt, so each
+ * field is written through the native-string helper and bounds are checked.
+ */
+bool packet_run_command(void* player, std::string_view command) {
+    if (player == nullptr || command.empty()) {
+        return false;
+    }
+    if (g_create_packet_original == nullptr) {
+        log_write(LogLevel::Warn, "runcmd unavailable: packet factory hook is not installed");
+        return false;
+    }
+    const PacketDispatcher* dispatcher = g_wrappers[kPacketCommandRequest].original;
+    if (dispatcher == nullptr) {
+        log_write(LogLevel::Warn, "runcmd unavailable: CommandRequest dispatcher was not captured");
+        return false;
+    }
+    std::vector<uint8_t> network_id;
+    uint8_t sub_client_id = 0;
+    if (!live_get_network_id(player, network_id, sub_client_id)) {
+        log_write(LogLevel::Warn, "runcmd unavailable: no NetworkIdentifier for this player");
+        return false;
+    }
+
+#ifdef _WIN32
+    std::shared_ptr<void> packet = g_create_packet_original(kPacketCommandRequest);
+    if (!packet) {
+        return false;
+    }
+    void* raw = packet.get();
+#else
+    alignas(16) unsigned char storage[16] = {};
+    g_create_packet_original(storage, kPacketCommandRequest);
+    void* raw = *reinterpret_cast<void**>(storage);
+    if (raw == nullptr) {
+        return false;
+    }
+#endif
+    const size_t stride = native_string_size(native_abi());
+    auto* payload = static_cast<unsigned char*>(raw) + kPacketBaseSize;
+
+    /* command */
+    if (!write_owned_string_at(payload, command)) {
+        return false;
+    }
+    unsigned char* cursor = payload + stride;
+    /* origin.type = "player" */
+    if (!write_owned_string_at(cursor, "player")) {
+        return false;
+    }
+    cursor += stride;
+    /* origin.uuid: all zero is accepted for a server-side request. */
+    std::memset(cursor, 0, 16);
+    cursor += 16;
+    /* origin.request_id */
+    if (!write_owned_string_at(cursor, "")) {
+        return false;
+    }
+    cursor += stride;
+    /* origin.player_entity_id: 0 means "derive from the connection". */
+    const int64_t entity_id = 0;
+    std::memcpy(cursor, &entity_id, sizeof(entity_id));
+    cursor += sizeof(entity_id);
+    /* internal flag */
+    *cursor++ = 0;
+    /* version string: the server rejects an empty version. */
+    if (!write_owned_string_at(cursor, "1")) {
+        return false;
+    }
+
+    PlayerView view = make_player_view(player);
+    if (WrappedPacketHandler::dispatch_packet(kPacketCommandRequest, raw, view)) {
+        return true;
+    }
+    /*
+     * The dispatcher calls back into NetEventCallback; passing nullptr crashes
+     * it.  ServerNetworkHandler inherits NetEventCallback and is the object the
+     * server itself passes, so reuse the handler captured at login.
+     */
+    void* callback = live_server_handler();
+    if (callback == nullptr) {
+        log_write(LogLevel::Warn, "runcmd: NetEventCallback is not available yet");
+        return false;
+    }
+#ifdef _WIN32
+    /*
+     * The dispatcher takes the shared_ptr by reference and may move a copy into
+     * its own bookkeeping.  Hand it a separate copy so our local reset below
+     * cannot drop the last reference while the server still uses it.
+     */
+    std::shared_ptr<void> dispatched = packet;
+    dispatcher->handle(network_id.data(), callback, &dispatched);
+    /* Leak-free hand-off: the server owns its copy; drop ours last. */
+    dispatched.reset();
+#else
+    dispatcher->handle(network_id.data(), callback, &raw);
+#endif
     return true;
 }
 

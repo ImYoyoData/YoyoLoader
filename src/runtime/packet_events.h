@@ -39,6 +39,9 @@ int packet_world_weather();
  */
 void packet_remember_vtable(void* packet, int packet_id);
 
+/* Execute a command through BDS's own CommandRequest pipeline. */
+bool packet_run_command(void* player, std::string_view command);
+
 /* Feed an outgoing packet to the observer without re-entering the hook. */
 void packet_observe_outgoing(void* player, void* packet);
 
