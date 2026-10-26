@@ -1,0 +1,37 @@
+# Normalise line endings by file type.
+#
+# Without this, a Windows checkout commits CRLF and every shell script breaks on
+# Linux with "/usr/bin/env: 'bash\r': No such file or directory".  That is what
+# made the first CI release runs fail.
+
+* text=auto eol=lf
+
+# Shell scripts and other Unix executables must stay LF.
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.py            text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.md            text eol=lf
+*.json          text eol=lf
+*.h             text eol=lf
+*.hpp           text eol=lf
+*.c             text eol=lf
+*.cc            text eol=lf
+*.cpp           text eol=lf
+*.txt           text eol=lf
+*.ini           text eol=lf
+
+# Windows batch files must stay CRLF.
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# Binary artifacts are never converted.
+*.exe           binary
+*.dll           binary
+*.so            binary
+*.lib           binary
+*.pdb           binary
+*.zip           binary
+*.tar.gz        binary
