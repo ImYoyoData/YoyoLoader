@@ -44,8 +44,20 @@ bool live_send_actionbar(void* player, std::string_view text);
 bool live_reset_title(void* player);
 bool live_send_toast(void* player, std::string_view title, std::string_view content);
 
-/* Player::sendForm(ModalFormRequestPacket). */
-bool live_send_form(void* player, std::string_view form_json);
+/* Player::sendForm(ModalFormRequestPacket).  `form_id`, when not null,
+ * receives the id assigned to the packet so a response can be matched. */
+bool live_send_form(void* player, std::string_view form_json, uint32_t* form_id = nullptr);
+
+/*
+ * Client-visible world effects.  These build the same packets BDS itself
+ * sends; they change what clients see and are safe on every build, unlike
+ * writing engine state whose layout we have not verified.
+ */
+bool live_spawn_particle(void* player, std::string_view name, const LiveVec3& position);
+bool live_set_time(void* player, int ticks);
+bool live_set_weather(void* player, int weather); /* 0 clear, 1 rain, 2 thunder */
+/* UpdateBlockPacket: tell a client that a block changed. */
+bool live_set_block(void* player, int x, int y, int z, uint32_t runtime_id, int flags);
 bool live_transfer(void* player, std::string_view host, int port);
 
 /* Actor geometry.  getPosition returns the eye position BDS stores in
@@ -79,5 +91,30 @@ uint64_t live_unique_id(void* actor);
 bool live_get_network_id(void* player, std::vector<uint8_t>& network_id, uint8_t& sub_client_id);
 
 bool live_actor_valid(void* actor);
+
+/*
+ * Layout safety.
+ *
+ * Object offsets are compiler/ABI dependent, so a new build on the same
+ * platform usually keeps them, but a build that reorders fields would make
+ * every read and write silently wrong.  Once a real player exists, the bridge
+ * validates the layout against that player: the component pointers must be
+ * readable, positions must be finite, and the dimension vtable must resolve.
+ *
+ * Validation result is cached.  While a fallback layout is unvalidated, reads
+ * are still attempted (they are bounds-checked) but writes are refused.
+ */
+enum class LayoutStatus {
+    Unknown,  /* no player has been observed yet */
+    Verified, /* offsets look correct for this build */
+    Rejected, /* offsets are wrong; live object access is disabled */
+};
+
+void live_validate_layout(void* player);
+LayoutStatus live_layout_status();
+bool live_layout_allows_write();
+
+/* Set when the running build has no exact version profile. */
+void live_set_layout_fallback(bool fallback);
 
 } // namespace yoyo

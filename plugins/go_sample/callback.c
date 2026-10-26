@@ -7,6 +7,12 @@
  */
 extern void go_yoyo_event(void *user, int type, const void *event);
 
+void yoyo_go_log(const yoyo_api *api, int level, const char *message) {
+    if (api != 0 && api->log != 0) {
+        api->log(level, message);
+    }
+}
+
 void yoyo_go_send_join_message(const yoyo_api *api, void *player, const char *message) {
     if (api->player_send_message != 0) {
         (void)api->player_send_message(player, message);

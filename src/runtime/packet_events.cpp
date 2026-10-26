@@ -10,7 +10,10 @@
 #include "runtime.h"
 
 #include <cstdint>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -26,6 +29,9 @@ constexpr int kPacketPlayerEquipment = 31;
 constexpr int kPacketInteract = 33;
 constexpr int kPacketPlayerAction = 36;
 constexpr int kPacketSetHealth = 42;
+constexpr int kPacketSetTime = 10;
+constexpr int kPacketLevelEvent = 25;
+constexpr int kPacketUpdateBlock = 21;
 constexpr int kPacketRespawn = 45;
 constexpr int kPacketDeathInfo = 189;
 constexpr int kPacketContainerOpen = 46;
@@ -62,6 +68,36 @@ enum PlayerActionType : int {
     ActionStartGliding = 15,
     ActionStopGliding = 16,
 };
+
+/* One block as reported by the server in an UpdateBlockPacket. */
+struct BlockEntry {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+    uint32_t runtime_id = 0;
+    int flags = 0;
+};
+
+/* World state observed from outgoing packets; read-only, no engine access. */
+struct WorldState {
+    int time = -1;
+    int weather = -1; /* 0 clear, 1 rain, 2 thunder */
+    bool time_valid = false;
+    bool weather_valid = false;
+    /* Blocks the server has told this client about.  Bounded so a long session
+     * cannot grow without limit. */
+    std::unordered_map<uint64_t, BlockEntry> blocks;
+};
+
+std::mutex& world_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+WorldState& world_state() {
+    static WorldState state;
+    return state;
+}
 
 struct PlayerState {
     bool initialized = false;
@@ -183,24 +219,41 @@ std::string uuid_hex(const void* data) {
     return result;
 }
 
-std::string read_form_response(const void* payload) {
-    /* ModalFormResponsePacket payload: uint32 form_id, optional<string>
-     * response, optional<uint8> cancel_reason.  MSVC optional stores the
-     * engaged flag first; libc++ stores the value first and the flag after
-     * the value. */
-    if (native_abi() == NativeAbi::Msvc) {
-        const auto* optional = static_cast<const unsigned char*>(payload) + 8;
-        if (optional[0] == 0) {
-            return {};
-        }
-        return read_string_at(optional, 8);
+struct FormResponse {
+    std::string text;
+    int cancel_reason = -1;
+    bool has_text = false;
+};
+
+FormResponse read_form_response(const void* payload) {
+    /*
+     * ModalFormResponsePacket payload:
+     *   +0  uint32 form_id
+     *   +8  optional<string> response
+     *   +8+sizeof(optional<string>) optional<uint8> cancel_reason
+     *
+     * Both MSVC and libc++ store the value before the engaged flag for
+     * optional<T>, so the string starts at the object's base and the flag
+     * sits just past the string.  optional<uint8> likewise has the value at
+     * +0 and its flag at +1.
+     */
+    FormResponse out;
+    const auto* base = static_cast<const unsigned char*>(payload);
+    const size_t string_size = native_string_size(native_abi());
+    const size_t optional_string_size = string_size + 8; /* value + flag + padding */
+
+    const auto* response = base + 8;
+    const bool response_engaged = response[string_size] != 0;
+    if (response_engaged) {
+        out.text = read_string_at(response, 0);
+        out.has_text = true;
     }
-    const auto* optional = static_cast<const unsigned char*>(payload) + 8;
-    std::string value = read_string_at(optional, 0);
-    if (!value.empty() || optional[24] != 0) {
-        return value;
+
+    const auto* reason = base + 8 + optional_string_size;
+    if (reason[1] != 0) {
+        out.cancel_reason = reason[0];
     }
-    return {};
+    return out;
 }
 
 PlayerView make_player_view(void* handle) {
@@ -483,20 +536,43 @@ void handle_player_equipment(void* packet, PlayerView& player) {
 void handle_form_response(void* packet, PlayerView& player, bool& cancelled) {
     const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
     const int32_t form_id = read_value<int32_t>(payload, 0);
+    const FormResponse response = read_form_response(payload);
     DetailEvent detail;
     detail.packet_id = kPacketModalFormResponse;
     detail.value = form_id;
-    detail.text = read_form_response(payload);
+    detail.text = response.text;
     if (emit_detail(YOYO_EVENT_FORM_RESPONSE, player, detail)) {
         cancelled = true;
+    }
+    if (player.handle != nullptr && form_id > 0) {
+        js::dispatch_form_response(static_cast<uint32_t>(form_id), player, response.text,
+                                   response.cancel_reason);
     }
 }
 
 void handle_command(void* packet, PlayerView& player, bool& cancelled) {
     const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    std::string command = read_string_at(payload, 0);
+
+    /*
+     * Intercept before BDS parses it.  A plugin command is fully handled here
+     * and the packet is dropped, so the vanilla command dispatcher never sees
+     * an unknown command.  Unregistered commands fall through untouched.
+     */
+    if (player.handle != nullptr && !command.empty() && js::has_player_command(command)) {
+        std::string output;
+        if (js::run_player_command(player, command, output)) {
+            if (!output.empty()) {
+                live_send_text(player.handle, output, LiveTextType::Raw);
+            }
+            cancelled = true;
+        }
+        return;
+    }
+
     DetailEvent detail;
     detail.packet_id = kPacketCommandRequest;
-    detail.text = read_string_at(payload, 0);
+    detail.text = command;
     if (emit_detail(YOYO_EVENT_PLAYER_COMMAND, player, detail)) {
         cancelled = true;
     }
@@ -534,6 +610,9 @@ void handle_respawn(void* packet, PlayerView& player) {
 }
 
 bool WrappedPacketHandler::dispatch_packet(int packet_id, void* packet, PlayerView& player) {
+    if (std::getenv("YOYO_DEBUG_CMD") != nullptr) {
+        log_write(LogLevel::Info, "dispatch_packet: id=%d player=%p", packet_id, player.handle);
+    }
     if (packet == nullptr) {
         return false;
     }
@@ -662,10 +741,65 @@ void handle_outgoing_health(PlayerView& player, void* packet) {
 
 void send_packet_detour(void* player_handle, void* packet) {
     const int packet_id = packet_id_for(packet);
+    if (std::getenv("YOYO_DEBUG_SEND") != nullptr) {
+        log_write(LogLevel::Info, "send hook: player=%p packet=%p id=%d", player_handle, packet, packet_id);
+    }
     bool cancelled = false;
     if (player_handle != nullptr && packet_id >= 0) {
         PlayerView player = make_player_view(player_handle);
-        if (packet_id == kPacketSetHealth) {
+        if (packet_id == kPacketSetTime) {
+            const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+            const int ticks = read_value<int32_t>(payload, 0);
+            std::lock_guard lock(world_mutex());
+            world_state().time = ticks;
+            world_state().time_valid = true;
+        } else if (packet_id == kPacketLevelEvent) {
+            /* LevelEventPacket: int16 event id then floats; 3001/3002 rain,
+             * 3003 thunder. */
+            const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+            const int16_t event_id = read_value<int16_t>(payload, 0);
+            std::lock_guard lock(world_mutex());
+            if (event_id == 3001) {
+                world_state().weather = 1;
+                world_state().weather_valid = true;
+            } else if (event_id == 3002) {
+                world_state().weather = 0;
+                world_state().weather_valid = true;
+            } else if (event_id == 3003) {
+                world_state().weather = 2;
+                world_state().weather_valid = true;
+            } else if (event_id == 1003) {
+                world_state().weather = world_state().weather == 1 ? 1 : 0;
+                world_state().weather_valid = true;
+            }
+        } else if (packet_id == kPacketUpdateBlock) {
+            /*
+             * UpdateBlockPacket payload:
+             *   +0  BlockPos position (int32 x, y, z)
+             *   +12 uint32 block runtime id
+             *   +16 uint32 flags
+             *   +20 uint32 layer
+             */
+            const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+            BlockEntry entry;
+            entry.x = read_value<int32_t>(payload, 0);
+            entry.y = read_value<int32_t>(payload, 4);
+            entry.z = read_value<int32_t>(payload, 8);
+            entry.runtime_id = read_value<uint32_t>(payload, 12);
+            entry.flags = read_value<int32_t>(payload, 16);
+            if (entry.y >= -512 && entry.y <= 512 && std::abs(entry.x) < 30000000 &&
+                std::abs(entry.z) < 30000000) {
+                std::lock_guard lock(world_mutex());
+                auto& blocks = world_state().blocks;
+                if (blocks.size() > 65536) {
+                    blocks.clear();
+                }
+                const uint64_t key = (static_cast<uint64_t>(entry.x & 0x3FFFFFF) << 38) |
+                                     (static_cast<uint64_t>(entry.z & 0x3FFFFFF) << 12) |
+                                     static_cast<uint64_t>(entry.y + 512);
+                blocks[key] = entry;
+            }
+        } else if (packet_id == kPacketSetHealth) {
             handle_outgoing_health(player, packet);
         } else if (packet_id == kPacketRespawn) {
             PlayerState state;
@@ -714,6 +848,9 @@ void wrap_packet(void* packet, int packet_id) {
     wrapper.packet_id = packet_id;
     wrapper.original = reinterpret_cast<const PacketDispatcher*>(handler);
     *handler_slot = &wrapper;
+    if (std::getenv("YOYO_DEBUG_WRAP") != nullptr) {
+        log_write(LogLevel::Info, "wrap_packet: id=%d handler=%p", packet_id, handler);
+    }
 }
 
 #ifdef _WIN32
@@ -732,49 +869,252 @@ void create_packet_detour(void* output, int packet_id) {
 }
 #endif
 
+
 } // namespace
+
+
+/*
+ * CommandRequestPacket layout (verified against the 1.26.x protocol schema):
+ *
+ *   std::string command            (varint length + bytes)
+ *   CommandOrigin origin:
+ *       std::string type           ("player")
+ *       mce::UUID uuid             (16 bytes)
+ *       std::string request_id
+ *       int64 player_entity_id
+ *   bool internal
+ *   std::string version            ("1")
+ *
+ * The command string is a native std::string, but the origin strings are
+ * *wire* strings (varint-prefixed), which is why the earlier attempt crashed:
+ * it wrote native strings there and the engine read garbage.
+ */
+
+/* Write a native std::string into a freshly created packet field. */
+bool write_owned_string_at(void* address, std::string_view value) {
+    if (address == nullptr) {
+        return false;
+    }
+    const NativeAbi abi = native_abi();
+    auto* base = static_cast<unsigned char*>(address);
+    std::memset(base, 0, native_string_size(abi));
+    if (value.empty()) {
+        if (abi == NativeAbi::Msvc) {
+            const size_t capacity = 15;
+            std::memcpy(base + 24, &capacity, sizeof(capacity));
+        }
+        return true;
+    }
+    char* data = static_cast<char*>(std::malloc(value.size() + 1));
+    if (data == nullptr) {
+        return false;
+    }
+    std::memcpy(data, value.data(), value.size());
+    data[value.size()] = 0;
+    if (abi == NativeAbi::Msvc) {
+        if (value.size() <= 15) {
+            std::memcpy(base, data, value.size() + 1);
+            std::free(data);
+            const size_t capacity = 15;
+            std::memcpy(base + 24, &capacity, sizeof(capacity));
+        } else {
+            std::memcpy(base, &data, sizeof(data));
+            const size_t capacity = value.size();
+            std::memcpy(base + 24, &capacity, sizeof(capacity));
+        }
+        size_t size = value.size();
+        std::memcpy(base + 16, &size, sizeof(size));
+    } else {
+        if (value.size() <= 22) {
+            base[0] = static_cast<unsigned char>(value.size() << 1);
+            std::memcpy(base + 1, data, value.size() + 1);
+            std::free(data);
+        } else {
+            const uint64_t capacity_field = (static_cast<uint64_t>(value.size()) << 1) | 1u;
+            std::memcpy(base, &capacity_field, sizeof(capacity_field));
+            size_t size = value.size();
+            std::memcpy(base + 8, &size, sizeof(size));
+            std::memcpy(base + 16, &data, sizeof(data));
+        }
+    }
+    return true;
+}
+
+/*
+ * Execute a command server-side.
+ *
+ * Rather than call an internal command entry point (whose signature changes
+ * every build), this builds a CommandRequestPacket with the same in-memory
+ * layout the server's own packet reader produces and hands it to the packet
+ * dispatcher it already uses for client packets.  The layout is:
+ *
+ *   std::string  command
+ *   struct origin { std::string type; uint8 uuid[16]; std::string request_id;
+ *                   int64 player_entity_id; }
+ *   bool   internal
+ *   std::string version
+ *
+ * Every string is a native std::string; only serialisation uses the wire
+ * format.  Getting this wrong is what crashed the earlier attempt, so each
+ * field is written through the native-string helper and bounds are checked.
+ */
+bool packet_run_command(void* player, std::string_view command) {
+    if (player == nullptr || command.empty()) {
+        return false;
+    }
+    if (g_create_packet_original == nullptr) {
+        log_write(LogLevel::Warn, "runcmd unavailable: packet factory hook is not installed");
+        return false;
+    }
+    const PacketDispatcher* dispatcher = g_wrappers[kPacketCommandRequest].original;
+    if (dispatcher == nullptr) {
+        log_write(LogLevel::Warn, "runcmd unavailable: CommandRequest dispatcher was not captured");
+        return false;
+    }
+    std::vector<uint8_t> network_id;
+    uint8_t sub_client_id = 0;
+    if (!live_get_network_id(player, network_id, sub_client_id)) {
+        log_write(LogLevel::Warn, "runcmd unavailable: no NetworkIdentifier for this player");
+        return false;
+    }
+
+#ifdef _WIN32
+    std::shared_ptr<void> packet = g_create_packet_original(kPacketCommandRequest);
+    if (!packet) {
+        return false;
+    }
+    void* raw = packet.get();
+#else
+    alignas(16) unsigned char storage[16] = {};
+    g_create_packet_original(storage, kPacketCommandRequest);
+    void* raw = *reinterpret_cast<void**>(storage);
+    if (raw == nullptr) {
+        return false;
+    }
+#endif
+    const size_t stride = native_string_size(native_abi());
+    auto* payload = static_cast<unsigned char*>(raw) + kPacketBaseSize;
+
+    /* command: the server-side parser expects the leading slash stripped,
+     * but it accepts it too; normalise to always have one. */
+    std::string normalized{command};
+    if (!normalized.empty() && normalized.front() != '/') {
+        normalized.insert(normalized.begin(), '/');
+    }
+    if (!write_owned_string_at(payload, normalized)) {
+        return false;
+    }
+    unsigned char* cursor = payload + stride;
+    /* origin.type = "player" */
+    if (!write_owned_string_at(cursor, "player")) {
+        return false;
+    }
+    cursor += stride;
+    /* origin.uuid: all zero is accepted for a server-side request. */
+    std::memset(cursor, 0, 16);
+    cursor += 16;
+    /* origin.request_id */
+    if (!write_owned_string_at(cursor, "")) {
+        return false;
+    }
+    cursor += stride;
+    /*
+     * CommandOrigin is a plain struct: the int64 must be 8-byte aligned, so
+     * insert padding when the string object size leaves the cursor misaligned.
+     */
+    while ((reinterpret_cast<uintptr_t>(cursor) & 7u) != 0) {
+        *cursor++ = 0;
+    }
+    /*
+     * origin.player_entity_id must be the *actor unique id* of this player's
+     * entity.  BDS dereferences this to build the command origin; leaving it 0
+     * makes the lookup fail and the server crashes right after the command
+     * runs.  This was the crash.
+     */
+    /*
+     * live_unique_id() reads an EnTT component whose hash is not stable across
+     * BDS builds; on 1.26.52.3 it returns a garbage value that makes the
+     * command origin invalid (and crashes the server afterwards).  The runtime
+     * id is the identifier the packet layer itself uses, so use that.
+     */
+    const int64_t entity_id = static_cast<int64_t>(live_runtime_id(player));
+    std::memcpy(cursor, &entity_id, sizeof(entity_id));
+    cursor += sizeof(entity_id);
+    /* internal flag */
+    *cursor++ = 0;
+    /* version string: the server rejects an empty version. */
+    if (!write_owned_string_at(cursor, "1")) {
+        return false;
+    }
+
+    PlayerView view = make_player_view(player);
+    if (WrappedPacketHandler::dispatch_packet(kPacketCommandRequest, raw, view)) {
+        return true;
+    }
+    /*
+     * The dispatcher calls back into NetEventCallback; passing nullptr crashes
+     * it.  ServerNetworkHandler inherits NetEventCallback and is the object the
+     * server itself passes, so reuse the handler captured at login.
+     */
+    void* callback = live_server_handler();
+    if (callback == nullptr) {
+        log_write(LogLevel::Warn, "runcmd: NetEventCallback is not available yet");
+        return false;
+    }
+#ifdef _WIN32
+    /*
+     * The dispatcher takes the shared_ptr by reference and may move a copy into
+     * its own bookkeeping.  Hand it a separate copy so our local reset below
+     * cannot drop the last reference while the server still uses it.
+     */
+    log_write(LogLevel::Info, "runcmd: entity_id=%lld", static_cast<long long>(entity_id));
+    std::shared_ptr<void> dispatched = packet;
+    dispatcher->handle(network_id.data(), callback, &dispatched);
+    log_write(LogLevel::Info, "runcmd: dispatcher returned");
+#else
+    dispatcher->handle(network_id.data(), callback, &raw);
+#endif
+    return true;
+}
 
 bool install_packet_hooks() {
     if (g_packet_hook_installed) {
         return true;
     }
-    const auto* version = state().profile;
-    if (version == nullptr) {
-        log_write(LogLevel::Error, "cannot install packet hook: no version profile");
-        return false;
-    }
-    const auto& live = version->live;
-    if (live.create_packet.rva == 0 || live.create_packet_hook_length < 12) {
+    const auto& target = state().symbols.create_packet;
+    const auto* live = state().layout;
+    if (live == nullptr || !target.valid() || live->create_packet_hook_length < 12) {
         log_write(LogLevel::Warn, "packet factory hook is not described for this build");
         return false;
     }
-    void* target = reinterpret_cast<void*>(state().module.base + live.create_packet.rva);
+    void* address = reinterpret_cast<void*>(target.address);
     bool ok = false;
 #ifdef _WIN32
-    ok = install_inline_hook(g_create_packet_hook, target, live.create_packet.bytes,
-                             live.create_packet_hook_length,
-                             reinterpret_cast<void*>(&create_packet_detour));
+    ok = install_inline_hook_masked(g_create_packet_hook, address, target.patch_bytes, target.patch_mask,
+                                    live->create_packet_hook_length,
+                                    reinterpret_cast<void*>(&create_packet_detour));
 #else
     void* jcc_target = nullptr;
-    if (live.create_packet_jcc_offset != 0) {
-        jcc_target = static_cast<unsigned char*>(target) + live.create_packet_jcc_target_offset;
+    if (live->create_packet_jcc_offset != 0) {
+        jcc_target = static_cast<unsigned char*>(address) + live->create_packet_jcc_target_offset;
     }
-    ok = install_inline_hook_short(g_create_packet_hook, target, live.create_packet.bytes,
-                                   live.create_packet_hook_length,
+    ok = install_inline_hook_short(g_create_packet_hook, address, target.patch_bytes,
+                                   live->create_packet_hook_length,
                                    reinterpret_cast<void*>(&create_packet_detour),
-                                   live.create_packet_jcc_offset,
-                                   live.create_packet_jcc_offset != 0 ? 2 : 0,
+                                   live->create_packet_jcc_offset,
+                                   live->create_packet_jcc_offset != 0 ? 2 : 0,
                                    jcc_target);
 #endif
     if (!ok) {
         log_write(LogLevel::Error, "failed to install MinecraftPackets::createPacket hook at rva=0x%llx",
-                  static_cast<unsigned long long>(live.create_packet.rva));
+                  static_cast<unsigned long long>(target.address - state().module.base));
         return false;
     }
     g_create_packet_original = reinterpret_cast<CreatePacketFn>(g_create_packet_hook.trampoline);
     g_packet_hook_installed = true;
     log_write(LogLevel::Info, "packet factory hook installed rva=0x%llx length=%u",
-              static_cast<unsigned long long>(live.create_packet.rva), live.create_packet_hook_length);
+              static_cast<unsigned long long>(target.address - state().module.base),
+              live->create_packet_hook_length);
     return true;
 }
 
@@ -793,15 +1133,15 @@ bool install_packet_send_hook(void* player) {
     if (player == nullptr) {
         return false;
     }
-    const auto* version = state().profile;
-    if (version == nullptr || version->live.send_network_packet_slot == 0) {
+    const auto* version = state().layout;
+    if (version == nullptr || version->send_network_packet_slot == 0) {
         return false;
     }
     auto** vtable = *reinterpret_cast<void***>(player);
     if (vtable == nullptr) {
         return false;
     }
-    const int slot = static_cast<int>(version->live.send_network_packet_slot / sizeof(void*));
+    const int slot = static_cast<int>(version->send_network_packet_slot / sizeof(void*));
     const char* error = nullptr;
     if (!install_vtable_hook(player, slot, reinterpret_cast<void*>(&send_packet_detour),
                              reinterpret_cast<void**>(&g_send_packet_original), nullptr, 0, &error)) {
@@ -841,6 +1181,62 @@ int packet_player_health(void* player) {
 void packet_forget_player(void* player) {
     std::lock_guard lock(state_mutex());
     player_states().erase(player);
+}
+
+bool packet_block_at(int x, int y, int z, uint32_t& runtime_id, int& flags) {
+    const uint64_t key = (static_cast<uint64_t>(x & 0x3FFFFFF) << 38) |
+                         (static_cast<uint64_t>(z & 0x3FFFFFF) << 12) |
+                         static_cast<uint64_t>(y + 512);
+    std::lock_guard lock(world_mutex());
+    const auto& blocks = world_state().blocks;
+    const auto it = blocks.find(key);
+    if (it == blocks.end()) {
+        return false;
+    }
+    runtime_id = it->second.runtime_id;
+    flags = it->second.flags;
+    return true;
+}
+
+void packet_observe_outgoing(void* player, void* packet) {
+    const int packet_id = packet_id_for(packet);
+    if (player == nullptr || packet_id < 0) {
+        return;
+    }
+    PlayerView view = make_player_view(player);
+    if (packet_id == kPacketSetTime) {
+        const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+        const int ticks = read_value<int32_t>(payload, 0);
+        std::lock_guard lock(world_mutex());
+        world_state().time = ticks;
+        world_state().time_valid = true;
+    } else if (packet_id == kPacketLevelEvent) {
+        const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+        const int16_t event_id = read_value<int16_t>(payload, 0);
+        std::lock_guard lock(world_mutex());
+        if (event_id == 3001) { world_state().weather = 1; world_state().weather_valid = true; }
+        else if (event_id == 3002) { world_state().weather = 0; world_state().weather_valid = true; }
+        else if (event_id == 3003) { world_state().weather = 2; world_state().weather_valid = true; }
+    }
+    (void)view;
+}
+
+int yoyo_debug_packet_id(void* packet) {
+    return packet_id_for(packet);
+}
+
+void packet_remember_vtable(void* packet, int packet_id) {
+    remember_packet_vtable(packet, packet_id);
+}
+
+int packet_world_time() {
+    std::lock_guard lock(world_mutex());
+    return world_state().time_valid ? world_state().time : -1;
+}
+
+int packet_world_weather() {
+    std::lock_guard lock(world_mutex());
+    return world_state().weather_valid ? world_state().weather : -1;
 }
 
 void packet_clear() {

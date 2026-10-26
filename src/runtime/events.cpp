@@ -114,6 +114,15 @@ void emit_chat(PlayerView& player, std::string& message, bool& cancelled) {
     call(snapshot(YOYO_EVENT_CHAT), YOYO_EVENT_CHAT, &event);
     cancelled = cancel != 0;
     js::dispatch_chat(player, message, cancelled);
+    if (!cancelled && js::has_player_command(message)) {
+        std::string output;
+        if (js::run_player_command(player, message, output)) {
+            cancelled = true;
+            if (!output.empty() && player.handle != nullptr) {
+                live_send_text(player.handle, output, LiveTextType::Raw);
+            }
+        }
+    }
     log_write(LogLevel::Info, "event chat name='%s' message='%.*s' cancelled=%d", player.name.c_str(),
               static_cast<int>(message.size()), message.data(), cancel);
 }

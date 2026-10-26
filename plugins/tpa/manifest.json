@@ -1,0 +1,1 @@
+{"name":"tpa","version":"1.0.0","engine":"javascript","entry":"main.js","description":"传送请求：/tpa /tpaccept /tpdeny","optionalDependencies":["title"]}

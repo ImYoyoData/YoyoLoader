@@ -1,0 +1,241 @@
+name: build-and-release
+
+# build   - compile both platforms and upload the packaged archives
+# release - on a version tag or a manual run with a version, create the GitHub
+#           Release and attach both archives plus their checksums
+on:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (for example 0.1.0). Leave empty to only build.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  # Resolve one version string so both platforms produce identically named files.
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release_tag: ${{ steps.v.outputs.release_tag }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - name: Compute version
+        id: v
+        run: |
+          set -e
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            RAW="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            RAW="${{ github.ref_name }}"
+          else
+            RAW=""
+          fi
+          VERSION="${RAW#v}"
+          if [[ -z "$VERSION" ]]; then
+            VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ -n "$RAW" ]]; then
+            echo "release_tag=v$VERSION" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_tag=" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "resolved version: $VERSION"
+
+  build-windows:
+    needs: prepare
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build
+        shell: cmd
+        run: scripts\build_windows.bat
+
+      - name: Package
+        shell: cmd
+        run: scripts\package_windows.bat ${{ needs.prepare.outputs.version }}
+
+      - name: Verify archive contents
+        shell: pwsh
+        run: |
+          $zip = (Get-ChildItem dist/*.zip | Select-Object -First 1).FullName
+          $tmp = Join-Path $env:RUNNER_TEMP "verify-win"
+          if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+          Expand-Archive -Path $zip -DestinationPath $tmp -Force
+          $required = @(
+            'yoyo.exe',
+            'yoyo_runtime.dll',
+            'README.txt',
+            'plugins/home/manifest.json',
+            'plugins/home/main.js',
+            'plugins/title/manifest.json',
+            'plugins/title/main.js',
+            'plugins/tpa/manifest.json',
+            'plugins/tpa/main.js',
+            'plugins/sample_cpp/manifest.json',
+            'plugins/sample_cpp/sample_cpp.dll'
+          )
+          $missing = @()
+          foreach ($rel in $required) {
+            $full = Join-Path $tmp $rel
+            if (-not (Test-Path $full)) { $missing += $rel }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "archive is missing: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "archive OK ($($required.Count) required entries)"
+          Get-ChildItem -Recurse -File $tmp | ForEach-Object {
+            $_.FullName.Substring($tmp.Length + 1)
+          } | Sort-Object
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yoyoloader-windows
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+
+  build-linux:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          # Pin the major version the project is developed against; a newer clang
+          # on the runner changes which warnings appear.
+          sudo apt-get install -y clang-14 lld-14
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
+          clang++ --version
+
+      - name: Build
+        env:
+          CXX: clang++
+          CC: clang
+        run: |
+          # Capture everything: a silent failure with no compiler output is
+          # almost always the script itself not running.
+          bash -x scripts/build_linux.sh 2>&1 | tail -120
+          exit ${PIPESTATUS[0]}
+
+      - name: Package
+        run: |
+          chmod +x scripts/package_linux.sh
+          ./scripts/package_linux.sh ${{ needs.prepare.outputs.version }}
+
+      - name: Verify archive contents
+        run: |
+          set -euo pipefail
+          ARCHIVE=$(ls dist/*.tar.gz | head -1)
+          echo "checking $ARCHIVE"
+          LIST=$(tar -tzf "$ARCHIVE" | sed 's|^\./||' | sort)
+          MISSING=""
+          REQUIRED="yoyo
+          libyoyo_runtime.so
+          README.txt
+          plugins/home/manifest.json
+          plugins/home/main.js
+          plugins/title/manifest.json
+          plugins/title/main.js
+          plugins/tpa/manifest.json
+          plugins/tpa/main.js
+          plugins/sample_cpp/manifest.json
+          plugins/sample_cpp/sample_cpp.so"
+          for f in $REQUIRED; do
+            if ! printf '%s\n' "$LIST" | grep -qx "$f"; then
+              MISSING="$MISSING $f"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "archive is missing:$MISSING"
+            exit 1
+          fi
+          echo "archive OK"
+          printf '%s\n' "$LIST"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yoyoloader-linux
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, build-windows, build-linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect archives
+        id: collect
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.zip' -o -name '*.zip.sha256' \
+            -o -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) -exec cp {} release/ \;
+          ls -l release
+          echo "count=$(ls release | wc -l)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        if: steps.collect.outputs.count != '0'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: YoyoLoader ${{ needs.prepare.outputs.version }}
+          draft: false
+          generate_release_notes: true
+          body: |
+            ## YoyoLoader ${{ needs.prepare.outputs.version }}
+
+            Extract the archive for your platform **directly into your BDS server root**,
+            then run `yoyo.exe` (Windows) or `./yoyo` (Linux) instead of the server binary.
+            The launcher finds `bedrock_server(.exe)` in the current directory and injects
+            the runtime automatically.
+
+            | Platform | Archive |
+            |---|---|
+            | Windows x64 | `YoyoLoader-${{ needs.prepare.outputs.version }}-win64.zip` |
+            | Linux x64 | `YoyoLoader-${{ needs.prepare.outputs.version }}-linux64.tar.gz` |
+
+            ### Supported BDS builds
+
+            | Version | Status |
+            |---|---|
+            | 1.26.52.3 | full support |
+            | 1.26.70.21 | partial — see `yoyo.log` at startup |
+
+            Unknown builds are probed automatically. Features that cannot be verified on the
+            running build are listed in `yoyo.log` and refused with a clear error instead of
+            crashing the server.
+
+            ### Included examples
+
+            `plugins/home` (`/home`), `plugins/title` (`/title`), `plugins/tpa` (`/tpa`).
+
+            Each archive has a matching `.sha256` file.
+          files: release/*

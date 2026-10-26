@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace yoyo {
 
@@ -23,5 +25,28 @@ int packet_player_held_slot(void* player);
 int packet_player_health(void* player);
 void packet_forget_player(void* player);
 void packet_clear();
+
+/* World time / weather observed from outgoing packets.  Returns -1 when the
+ * value has never been seen on this connection. */
+int packet_world_time();
+int packet_world_weather();
+
+/*
+ * Register a packet's vtable so outgoing packets built by the live bridge can
+ * be identified by id.  The live bridge creates packets through the same
+ * factory, but its calls go to the original function directly, so the id must
+ * be recorded here.
+ */
+void packet_remember_vtable(void* packet, int packet_id);
+
+/* Execute a command through BDS's own CommandRequest pipeline. */
+bool packet_run_command(void* player, std::string_view command);
+
+/* Feed an outgoing packet to the observer without re-entering the hook. */
+void packet_observe_outgoing(void* player, void* packet);
+
+/* A block the server has reported to this client.  Returns false when the
+ * position has not been observed yet. */
+bool packet_block_at(int x, int y, int z, uint32_t& runtime_id, int& flags);
 
 } // namespace yoyo

@@ -1,7 +1,7 @@
 # YoyoLoader API 覆盖审计
 
-日期：2026-10-22  
-目标：BDS 1.26.52.3，Windows x64 / Linux x64  
+日期：2026-10-26
+目标：BDS 1.26.52.3，Windows x64 / Linux x64
 测试方式：NetherNet 离线 bot 连接真实服务器；Windows 与 Linux 各一轮。
 
 图例：
@@ -9,6 +9,17 @@
 - ✅ 已实现并实测
 - 🟡 数据模型可用，但未连接实时世界
 - ❌ 未实现；调用会抛出说明性错误
+
+## 跨版本支持
+
+| 能力 | 状态 |
+|---|---|
+| 已知 build id 走 RVA 表 | ✅ |
+| 未知 build id 时用特征签名定位 hook | ✅ Windows 实测（7/7 唯一且落在正确 RVA） |
+| 特征不唯一 / 入口字节不符时拒绝 patch | ✅ |
+| Linux 特征签名 | 🟡 使用经验证的序言字节，本机无 Linux 镜像，未验证唯一性；歧义时 fail-closed |
+| 未知版本的对象布局校验（首个玩家出现时） | ✅ 失败则禁用写操作 |
+| 未知版本与已知版本使用同一份对象布局 | 🟡 同平台沿用上一份布局，通过运行时校验确认 |
 
 ## 事件
 
@@ -82,7 +93,20 @@
 | `setTitle` / `setContent` / `setConfirm` / `setCancel` | ✅ |
 | `toJSON` / `toString` | ✅ |
 | `form.sendTo(player)` / `player.sendForm` | ✅ 真实 ModalFormRequest 包下发 |
-| 表单响应回调（客户端提交 → JS callback） | 🟡 全局 `onFormResponse`；Form 对象级回调未接入 |
+| Form 对象级响应回调 `sendTo(player, cb)` / `sendForm(form, cb)` | ✅ 按 form id 回填，已自测 |
+| `player.sendModalForm(title, content, ok, cancel, cb)` | 🟡 已实现，未做真实客户端验证 |
+| 全局 `onFormResponse` | ✅ |
+
+## 定时器 / 脚本辅助 / 配置 / 文件
+
+| API | 状态 |
+|---|---|
+| `setTimeout` / `setInterval` / `clearInterval` / `clearTimeout`（函数或代码字符串） | ✅ 由 `Level::tick` 驱动，已自测 |
+| `log` / `colorLog` / `fastLog` | ✅ |
+| `mc.regPlayerCmd` / `mc.regConsoleCmd` | 🟡 聊天命令层；玩家命令已接入 `onChat`，控制台命令需控制台输入 hook |
+| `new JsonConfigFile` / `new IniConfigFile`（含 `mc.newConfig`） | ✅ 路径限制在服务器目录内，已自测 |
+| `new File` + 同步/异步方法 | ✅ 同步实现；异步方法同步回调，已自测 |
+| `mc.getBDSVersion` / `mc.getDimensionId` / `mc.getDimensionName` / `mc.getOnlinePlayerNum` | ✅ |
 
 ## 物品 / 方块 / 容器 / 实体
 
@@ -99,14 +123,17 @@
 |---|---|
 | `mc.log` | ✅ |
 | `mc.getServerVersion` | ✅（build id） |
-| `mc.getModuleBase` | ✅ |
-| `mc.broadcast` | ✅ 真实 TextPacket，发送给在线玩家 |
+| `mc.getModuleBase` | ✅ || `mc.broadcast` | ✅ 真实 TextPacket，发送给在线玩家 |
 | `mc.getLevel` | 🟡 轻量对象，仅玩家列表/数量 |
 | `mc.worlds.list/current/isController/load/unload/switch/isOp` | ✅ Windows / Linux 多进程世界；Linux 使用 fork+exec+yoyo |
 | `player.transfer(host, port)` | ✅ 真实 TransferPacket |
 | `mc.runcmd` / `mc.runcmdEx` | ❌ 需要 CommandOrigin / MinecraftCommands |
-| Scoreboard / BossBar / Map / Boss Event | ❌ |
-| 世界时间 / 天气 | ❌ |
+| `mc.newCommand` 原生命令注册 | ❌ 需要 CommandRegistry |
+| 时间 / 天气 / 最大玩家数 / MOTD | ❌ 有意不做：只能伪造客户端显示，改不了引擎状态 |
+| Scoreboard / BossBar / Map / Boss Event | ❌ 有意不做：需要重建协议对象，版本之间最脆弱 |
+| `addEffect` / `removeEffect` | ❌ 有意不做：发包只影响客户端显示，服务端状态不变 |
+| 模拟玩家 `spawnSimulatedPlayer` | ❌ 有意不做：需要完整 `ServerPlayer` 生命周期 |
+| 深层方块事件（红石 / 活塞 / 流体 / 漏斗） | ❌ 有意不做：每个都要单独 hook，版本脆弱 |
 
 ## 插件类型
 
@@ -146,3 +173,8 @@
   尚未在本轮启动服务器做运行验证。
 - Windows 的 12 字节短 hook 和 Linux 的 12 字节短 hook 都做了独立分支跳转自测
   （`low=42 high=7`）。
+- JS 定时器、JSON/INI 配置、File 读写、表单回调表已在
+  `_test/js_selftest.cpp` 中脱离 BDS 真实运行通过（9 项断言全部 PASS）。
+- 特征签名解析在 `_test/sig_selftest.cpp` 中通过三组验证：真实镜像里 7 条特征
+  各自唯一且落在记录的 RVA 上；以空版本档案映射镜像后 7 个目标全部靠特征解析成功；
+  篡改被通配的栈帧立即数后特征仍命中同一位置。

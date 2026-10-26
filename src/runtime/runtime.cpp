@@ -1,6 +1,8 @@
 #include "runtime.h"
 
+#include "capabilities.h"
 #include "hooks.h"
+#include "live.h"
 #include "log.h"
 #include "packet_events.h"
 #include "plugin_loader.h"
@@ -28,8 +30,30 @@ void runtime_start() {
     log_write(LogLevel::Info, "build id: %s", g_state.module.build_id);
 
     g_state.profile = find_profile(g_state.module.build_id);
-    if (g_state.profile == nullptr) {
-        log_write(LogLevel::Error, "unsupported bedrock_server build; no hooks installed");
+    if (g_state.profile != nullptr) {
+        g_state.layout = &g_state.profile->live;
+        g_state.layout_fallback = false;
+        log_write(LogLevel::Info, "build matched an exact version profile");
+    } else {
+        /*
+         * Unknown build: the hook targets still come from signatures, and the
+         * closest layout is used for object offsets.  Writes that depend on an
+         * unverified layout are skipped by the live bridge, so the runtime
+         * degrades to read-only observation instead of guessing.
+         */
+        g_state.layout = fallback_layout();
+        g_state.layout_fallback = g_state.layout != nullptr;
+        live_set_layout_fallback(true);
+        log_write(LogLevel::Warn,
+                  "unsupported build id; hooks will be found by signature and object layout is a fallback");
+    }
+
+    log_capability_report();
+
+    g_state.symbols = resolve_symbols(g_state.module.base, g_state.profile);
+    log_write(LogLevel::Info, "symbol resolution: %s", describe_resolution(g_state.symbols).c_str());
+    if (!g_state.symbols.any()) {
+        log_write(LogLevel::Error, "no hook targets could be resolved; refusing to patch");
         return;
     }
 

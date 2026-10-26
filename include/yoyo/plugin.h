@@ -209,10 +209,14 @@ typedef const yoyo_api *(YOYO_CALL *yoyo_plugin_entry_fn)(const yoyo_api *api);
 /*
  * Every plugin (DLL/SO) must export this symbol.  Return the same `api`
  * pointer on success, or NULL if the plugin refuses to load.
- * The definition should be written as:
+ *
+ * The declaration is intentionally only a *pointer type*, not a function
+ * prototype: cgo generates its own export with the C types in the Go file, and
+ * a conflicting prototype here breaks the Go build.  C and C++ plugins define
+ * the symbol directly:
+ *
  *     YOYO_EXPORT const yoyo_api* YOYO_CALL yoyo_plugin_entry(const yoyo_api* api)
  */
-YOYO_EXPORT const yoyo_api *YOYO_CALL yoyo_plugin_entry(const yoyo_api *api);
 
 #ifdef __cplusplus
 } /* extern "C" */

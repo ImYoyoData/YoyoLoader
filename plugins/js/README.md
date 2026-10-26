@@ -84,6 +84,119 @@ observed. `onPacketSend` skips high-volume chunk/level-sound packets.
 Other LLSE event names are accepted by `mc.listen` but only log a warning; they
 do not fire in this build.
 
+## LegacyScriptEngine compatibility
+
+YoyoLoader exposes an LLSE-shaped surface alongside its own API, so plugins
+written against
+[LegacyScriptEngine](https://docs.levimc.org/LegacyScriptEngine/zh/apis/) can
+usually run unmodified.
+
+**Positions**
+
+```js
+pl.pos        // FloatPos: x, y, z, dimid, dim ("主世界"), toString()
+pl.feetPos    // FloatPos
+pl.blockPos   // IntPos
+pl.direction  // DirectionAngle: pitch, yaw, toFacing() -> 0..3
+
+new IntPos(x, y, z, dimid)
+new FloatPos(x, y, z, dimid)
+new DirectionAngle(pitch, yaw)
+```
+
+`dimid` is `0` overworld, `1` nether, `2` end. `dim` is the LLSE display string.
+`dimension` / `dimensionName` are kept as aliases for older YoyoLoader plugins.
+
+**Player methods**
+
+| LLSE | YoyoLoader equivalent | Status |
+|---|---|---|
+| `pl.tell(msg[, type])` | `sendMessage` | ✅ type 0/1/4/5 mapped to raw/tip/system/popup |
+| `pl.sendText(msg[, type])` | `sendMessage` | ✅ |
+| `pl.setTitle(text[, type[, fadeIn, stay, fadeOut]])` | `sendTitle` | ✅ type 0 title, 1 actionbar, 2 subtitle |
+| `pl.sendToast(title, msg)` | `sendToast` | ✅ |
+| `pl.getPos()` / `getFeetPos()` / `getBlockPos()` | — | ✅ |
+| `pl.getDirection()` | `getRotation` | ✅ |
+| `pl.isOP()` | — | ✅ checks `yoyo_ops.txt` |
+| `pl.kick([msg])` | `kick` | ✅ |
+| `pl.transServer(host, port)` | `transfer` | ✅ |
+| `pl.setGameMode(mode)` | `setGameMode` | ✅ (capability-gated) |
+| `pl.runcmd(cmd)` | — | ❌ throws a named error |
+| `pl.getInventory()` / `giveItem` / `getArmor` | — | ❌ throws a named error |
+
+**Items and blocks**
+
+```js
+const it = mc.newItem("minecraft:bread", 3);
+it.type; it.name; it.id; it.count; it.maxCount; it.aux; it.damage;
+it.getNbt(); it.setNbt(nbt); it.clone(); it.isNull();
+```
+
+Block objects passed to block events carry `name`, `type`, `id`, `pos`
+(IntPos), `tileData`, `isAir`, `getType()`, `getPos()`.
+
+**Cancellation**
+
+LLSE cancels an interceptable event by **returning `false`** from the
+listener. YoyoLoader supports exactly that, and also keeps the older
+`event.cancelled = true` form:
+
+```js
+mc.listen("onChat", (pl, msg) => {
+    if (msg === "!cancelme") return false;   // LLSE style — event is dropped
+});
+```
+
+Verified on a real server: returning `false` drops the event, returning
+anything else lets it through.
+
+**Event name aliases**
+
+`onServerStarted` → `onServerReady`, `onChangeDim` → `onPlayerChangeDimension`,
+`onexit` → `onLeft`, `onMobDie` → `onPlayerDie` (player deaths only).
+
+**World effects and world state (implemented, verified on a live server)**
+
+```js
+// write side — sends the packets BDS itself sends
+mc.spawnParticle(pl.pos, "minecraft:heart_particle");
+mc.spawnParticle(x, y, z, dimid, "minecraft:heart_particle");
+mc.setTime(6000);
+mc.setWeather(1);           // 0 clear, 1 rain, 2 thunder
+
+// read side — served from packets the server already sent to this client
+mc.getTime();               // ticks; 0 daytime, 1 gametime, 2 day
+mc.getWeather();            // 0/1/2
+mc.getBlock(pos);           // Block or null when that position was never updated
+mc.setBlock(pos, name, runtimeId);   // UpdateBlockPacket to all players
+```
+
+`getTime` / `getWeather` / `getBlock` are backed by an observer on the outgoing
+packet stream, including packets YoyoLoader builds itself. That means they are
+always the values the client is actually rendering, and they cannot desynchronise
+from the server. The trade-off is coverage: a value that was never sent (a chunk
+the client never received, or time before any `SetTimePacket`) returns `null` /
+throws rather than guessing from engine memory.
+
+`setBlock` needs an explicit `runtimeId` because the block-name → runtime-id
+table is version specific. It changes what clients render; it does not modify
+the server's world data, so re-entering the chunk restores the original block.
+
+**Deliberately not implemented** — these throw a precise message instead of
+being silently absent:
+
+| API | Why |
+|---|---|
+| `mc.runcmd` / `mc.runcmdEx` | needs a `CommandOrigin` whose layout is version-specific. Synthesising a `CommandRequestPacket` *does* execute the command, but the server crashes right after, so it is refused rather than shipped broken. Use `mc.regPlayerCmd` for player-issued commands. |
+| — | `getBlock`/`setBlock` are implemented via the packet cache described above |
+| `pl.getInventory` / `giveItem` / `getArmor` / `getEnderChest` | needs live `Container` + `ItemStack` ABI |
+| `mc.getPlayerNbt` / `setPlayerNbt` | full player NBT serialisation is the most version-fragile area |
+| `mc.getTime` / `mc.getWeather` | read side needs `Level`/`WeatherManager` state; only the write helpers above are implemented |
+| entity spawning / `mc.getAllEntities` | needs `ActorFactory` and `Level` actor iteration |
+
+The rule (see `PROJECT_RULES.md` 1.6) is that a crash is worse than a missing
+feature: anything that cannot be done safely refuses with a name, not a crash.
+
 ## Player
 
 Properties: `name`, `xuid`, `address`, `runtimeId`, `isOnline`.
@@ -160,7 +273,110 @@ mc.getLevel();                       // lightweight level view
 mc.log("message");
 mc.getServerVersion();               // build id
 mc.getModuleBase();
+mc.getBDSVersion();                  // "1.26.52.3"
+mc.getDimensionId("nether");         // 1, or null
+mc.getDimensionName(2);              // "the_end", or null
+mc.getOnlinePlayerNum();
 ```
+
+## Timers and script helpers
+
+```js
+log("plain console line");            // same as mc.log
+colorLog("§a", "colored line");
+fastLog("asynchronous-style log");    // same sink, safe from any listener
+
+const t1 = setTimeout(() => player.sendMessage("hi"), 1000);
+const t2 = setInterval(() => mc.broadcast("tick"), 5000);
+clearInterval(t1);                    // cancels both one-shot and repeating ids
+clearTimeout(t2);                     // alias
+```
+
+Timers are drained from `Level::tick` on the game thread, so a timer callback
+may send packets or touch world state. Delays are milliseconds; resolution is
+one server tick (50 ms by default).
+
+## Chat commands
+
+```js
+mc.regPlayerCmd("spawn", "Teleport to spawn", (player, args, output) => {
+    player.teleport({ x: 0, y: 64, z: 0 });
+    output.success("§aWelcome back");
+    return "§bTeleported";       // returned string is sent to the player
+}, 0);                           // 0 = everyone, 1 = OPs in yoyo_ops.txt
+```
+
+A matching chat line (with or without a leading `/` or `!`) is removed from
+chat and routed to the callback. `args` is everything after the command name.
+This is a YoyoLoader chat-command layer, not a vanilla command registration:
+tab completion and `/help` integration are not provided.
+
+## Config files
+
+```js
+const cfg = new JsonConfigFile("plugins/config.json", '{"enabled":true}');
+cfg.set("greeting", "hello");
+cfg.get("greeting", "default");
+cfg.init("version", 1);       // returns the stored value or writes the default
+cfg.delete("greeting");
+cfg.getPath();
+cfg.read();                   // whole file as text
+cfg.write("{}");
+cfg.reload();
+
+const ini = new IniConfigFile("plugins/config.ini");
+ini.set("main", "port", "19132");
+ini.getStr("main", "port", "0");
+ini.getInt("main", "port", 0);
+ini.getFloat("main", "ratio", 0);
+ini.getBool("main", "debug", false);
+ini.delete("main", "port");
+```
+
+Paths are resolved inside the server directory. Absolute paths and `..`
+escapes are rejected, so a plugin cannot touch arbitrary host files.
+
+## File objects
+
+```js
+const file = new File("plugins/data/log.txt", "a");
+file.writeLineSync("line");
+file.close();
+
+const reader = new File("plugins/data/log.txt", "r");
+reader.readLineSync();        // "line", or null at the end
+reader.readSync(16);          // at most 16 bytes as text
+reader.readAllSync();
+reader.seekTo(0, false);
+reader.isEOF();
+reader.flush();
+reader.close();
+
+const writer = new File("plugins/data/raw.bin", "w", true);  // binary mode
+```
+
+`read`, `readLine`, `readAll`, `write` and `writeLine` accept a callback and
+run it synchronously with the same result, so LLSE-style async code works
+without a worker thread.
+
+## Form callbacks
+
+```js
+const form = mc.newSimpleForm("Title", "Content");
+form.addButton("OK");
+form.addButton("Cancel");
+
+player.sendForm(form, (player, id, reason) => {
+    // id is the clicked button index, or null when the player closed the form
+    // reason: 0 = user closed, 1 = user busy
+});
+
+player.sendModalForm("Confirm", "Continue?", "Yes", "No",
+    (player, result, reason) => { /* result is true/false or null */ });
+```
+
+`form.sendTo(player, callback)` is equivalent. `onFormResponse` still fires
+globally for every form response.
 
 ## NBT
 

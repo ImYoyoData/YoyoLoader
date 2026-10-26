@@ -1,6 +1,7 @@
 #include "js_engine.h"
 
 #include "js_internal.h"
+#include "../capabilities.h"
 #include "../events.h"
 #include "../live.h"
 #include "../log.h"
@@ -10,6 +11,7 @@
 #include "../runtime.h"
 #include "../worlds.h"
 
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -27,7 +29,24 @@ namespace {
 
 JSRuntime* g_runtime = nullptr;
 std::recursive_mutex g_mutex;
-std::unordered_map<std::string, std::vector<JSValue>> g_listeners;
+
+/*
+ * One QuickJS context per plugin file.  They share a JSRuntime (so values can
+ * move between them when we hand a Player object to a listener) but each has
+ * its own global object, which is what gives plugin isolation: two plugins can
+ * both define `handleCommand` without clobbering each other, and an exception
+ * in one cannot touch another's globals.
+ */
+struct Listener {
+    JSContext* ctx = nullptr;
+    JSValue fn = JS_UNDEFINED;
+};
+
+std::unordered_map<std::string, std::vector<Listener>> g_listeners;
+std::vector<JSContext*> g_plugin_contexts;
+
+/* Context whose code is currently running; set before invoking a listener. */
+JSContext* g_active = nullptr;
 
 std::string to_std_string(JSContext* ctx, JSValueConst value) {
     const char* text = JS_ToCString(ctx, value);
@@ -52,6 +71,13 @@ JSValue throw_no_live_player(JSContext* ctx) {
     return JS_ThrowInternalError(ctx, "this Player is not backed by a live ServerPlayer");
 }
 
+
+JSValue throw_capability(JSContext* ctx, const char* feature) {
+    return JS_ThrowInternalError(ctx,
+                                 "%s is not verified for this BDS build; see the startup capability report",
+                                 feature);
+}
+
 bool get_number_property(JSContext* ctx, JSValueConst object, const char* name, double& out) {
     JSValue value = JS_GetPropertyStr(ctx, object, name);
     double number = 0.0;
@@ -71,11 +97,13 @@ std::string normalize_event(std::string name) {
     if (name == "onPreJoin" || name == "pre_join") return "onPreJoin";
     if (name == "onJoin" || name == "join") return "onJoin";
     if (name == "onChat" || name == "chat") return "onChat";
-    if (name == "onLeft" || name == "left") return "onLeft";
-    if (name == "onServerReady" || name == "server_ready") return "onServerReady";
+    if (name == "onLeft" || name == "left" || name == "onexit") return "onLeft";
+    if (name == "onServerReady" || name == "server_ready" || name == "onServerStarted") {
+        return "onServerReady";
+    }
     if (name == "onTick" || name == "tick") return "onTick";
     if (name == "onPlayerMove" || name == "player_move") return "onPlayerMove";
-    if (name == "onPlayerChangeDimension" || name == "player_change_dimension" ||
+    if (name == "onChangeDim" || name == "onPlayerChangeDimension" || name == "player_change_dimension" ||
         name == "player_dimension") {
         return "onPlayerChangeDimension";
     }
@@ -123,7 +151,9 @@ std::string normalize_event(std::string name) {
     if (name == "onPlayerHealthChange" || name == "onHealthChange" || name == "health_change") {
         return "onPlayerHealthChange";
     }
-    if (name == "onPlayerDie" || name == "onDie" || name == "player_die") return "onPlayerDie";
+    if (name == "onPlayerDie" || name == "onDie" || name == "player_die" || name == "onMobDie") {
+        return "onPlayerDie";
+    }
     if (name == "onPacketSend" || name == "packet_send") return "onPacketSend";
     return name;
 }
@@ -148,22 +178,28 @@ bool call_listeners_locked(const std::string& event, int argc, JSValueConst* arg
     if (it == g_listeners.end() || it->second.empty()) {
         return false;
     }
-    std::vector<JSValue> callbacks;
-    callbacks.reserve(it->second.size());
-    for (JSValue fn : it->second) {
-        callbacks.push_back(JS_DupValue(g_context, fn));
-    }
 
     bool cancelled = false;
-    for (JSValue fn : callbacks) {
-        JSValue result = JS_Call(g_context, fn, JS_UNDEFINED, argc, argv);
+    for (const auto& listener : it->second) {
+        if (listener.ctx == nullptr || !JS_IsFunction(listener.ctx, listener.fn)) {
+            continue;
+        }
+        /*
+         * Isolate failures: each listener runs with its own context active and
+         * its own exception handler, so one plugin throwing cannot stop the
+         * others or escape into the server.
+         */
+        JSContext* previous = g_active;
+        g_active = listener.ctx;
+        JS_UpdateStackTop(g_runtime);
+        JSValue result = JS_Call(listener.ctx, listener.fn, JS_UNDEFINED, argc, argv);
         if (JS_IsException(result)) {
-            log_exception(g_context);
-        } else if (JS_IsBool(result) && JS_ToBool(g_context, result) == 0) {
+            log_exception(listener.ctx);
+        } else if (JS_IsBool(result) && JS_ToBool(listener.ctx, result) == 0) {
             cancelled = true;
         }
-        JS_FreeValue(g_context, result);
-        JS_FreeValue(g_context, fn);
+        JS_FreeValue(listener.ctx, result);
+        g_active = previous;
     }
     return cancelled;
 }
@@ -236,14 +272,41 @@ JSValue player_send_toast(JSContext* ctx, JSValueConst this_val, int argc, JSVal
     return JS_NewBool(ctx, live_send_toast(handle, title, content));
 }
 
+JSValue player_send_modal_form(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 4) {
+        return JS_ThrowTypeError(ctx, "sendModalForm(title, content, confirm, cancel[, callback]) requires 4 arguments");
+    }
+    JSValue schema = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, schema, "type", JS_NewString(ctx, "modal"));
+    JS_SetPropertyStr(ctx, schema, "title", JS_DupValue(ctx, argv[0]));
+    JS_SetPropertyStr(ctx, schema, "content", JS_DupValue(ctx, argv[1]));
+    JS_SetPropertyStr(ctx, schema, "button1", JS_DupValue(ctx, argv[2]));
+    JS_SetPropertyStr(ctx, schema, "button2", JS_DupValue(ctx, argv[3]));
+    JSValue json = JS_JSONStringify(ctx, schema, JS_UNDEFINED, JS_UNDEFINED);
+    JS_FreeValue(ctx, schema);
+    if (JS_IsException(json)) {
+        log_exception(ctx);
+        return JS_EXCEPTION;
+    }
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) {
+        JS_FreeValue(ctx, json);
+        return throw_no_live_player(ctx);
+    }
+    std::string text = to_std_string(ctx, json);
+    JS_FreeValue(ctx, json);
+
+    uint32_t form_id = 0;
+    const bool sent = live_send_form(handle, text, &form_id);
+    if (sent && argc > 4 && JS_IsFunction(ctx, argv[4])) {
+        remember_form_callback(form_id, argv[4]);
+    }
+    return JS_NewBool(ctx, sent);
+}
+
 JSValue make_location(JSContext* ctx, const LiveVec3& position, int dimension, bool include_rotation, float pitch,
                       float yaw) {
-    JSValue object = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, object, "x", JS_NewFloat64(ctx, position.x));
-    JS_SetPropertyStr(ctx, object, "y", JS_NewFloat64(ctx, position.y));
-    JS_SetPropertyStr(ctx, object, "z", JS_NewFloat64(ctx, position.z));
-    JS_SetPropertyStr(ctx, object, "dimension", JS_NewInt32(ctx, dimension));
-    JS_SetPropertyStr(ctx, object, "dimensionName", JS_NewString(ctx, live_dimension_name(dimension)));
+    JSValue object = make_float_pos(ctx, position.x, position.y, position.z, dimension);
     if (include_rotation) {
         JS_SetPropertyStr(ctx, object, "pitch", JS_NewFloat64(ctx, pitch));
         JS_SetPropertyStr(ctx, object, "yaw", JS_NewFloat64(ctx, yaw));
@@ -252,18 +315,16 @@ JSValue make_location(JSContext* ctx, const LiveVec3& position, int dimension, b
 }
 
 JSValue player_get_position(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "getPosition");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     LiveVec3 position;
     if (!live_get_position(handle, position)) return JS_NULL;
-    JSValue object = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, object, "x", JS_NewFloat64(ctx, position.x));
-    JS_SetPropertyStr(ctx, object, "y", JS_NewFloat64(ctx, position.y));
-    JS_SetPropertyStr(ctx, object, "z", JS_NewFloat64(ctx, position.z));
-    return object;
+    return make_float_pos(ctx, position.x, position.y, position.z, live_get_dimension(handle));
 }
 
 JSValue player_get_location(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "getLocation");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     LiveVec3 position;
@@ -276,6 +337,7 @@ JSValue player_get_location(JSContext* ctx, JSValueConst this_val, int, JSValueC
 }
 
 JSValue player_get_rotation(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_rotation)) return throw_capability(ctx, "getRotation");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     float pitch = 0.0f;
@@ -288,12 +350,14 @@ JSValue player_get_rotation(JSContext* ctx, JSValueConst this_val, int, JSValueC
 }
 
 JSValue player_get_dimension(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "getDimension");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewInt32(ctx, live_get_dimension(handle));
 }
 
 JSValue player_get_dimension_name(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "getDimensionName");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewString(ctx, live_dimension_name(live_get_dimension(handle)));
@@ -304,6 +368,7 @@ JSValue player_get_runtime_id(JSContext* ctx, JSValueConst this_val, int, JSValu
 }
 
 JSValue player_get_game_mode(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_game_mode)) return throw_capability(ctx, "getGameMode");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewInt32(ctx, live_get_game_mode(handle));
@@ -317,6 +382,7 @@ JSValue player_get_game_mode_name(JSContext* ctx, JSValueConst this_val, int, JS
 
 JSValue player_set_game_mode(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "setGameMode(mode) requires an argument");
+    if (!capability_enabled(&VersionCapabilities::player_set_game_mode)) return throw_capability(ctx, "setGameMode");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     int32_t mode = 0;
@@ -334,6 +400,7 @@ JSValue player_set_game_mode(JSContext* ctx, JSValueConst this_val, int argc, JS
 }
 
 JSValue player_get_unique_id(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_identity)) return throw_capability(ctx, "getUniqueId");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewInt64(ctx, static_cast<int64_t>(live_unique_id(handle)));
@@ -371,6 +438,7 @@ JSValue player_get_health(JSContext* ctx, JSValueConst this_val, int, JSValueCon
 }
 
 JSValue player_teleport(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (!capability_enabled(&VersionCapabilities::player_teleport)) return throw_capability(ctx, "teleport");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     if (argc < 1) return JS_ThrowTypeError(ctx, "teleport(x, y, z[, dimension]) requires coordinates");
@@ -526,7 +594,7 @@ JSValue mc_listen(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
         log_write(LogLevel::Warn, "js event '%s' is not implemented yet; listener stored but it will not fire",
                   event.c_str());
     }
-    g_listeners[event].push_back(JS_DupValue(ctx, argv[1]));
+    g_listeners[event].push_back({ctx, JS_DupValue(ctx, argv[1])});
     return JS_TRUE;
 }
 
@@ -571,8 +639,294 @@ JSValue mc_get_module_base(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return JS_NewInt64(ctx, static_cast<int64_t>(state().module.base));
 }
 
+JSValue mc_get_dimension_id(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_NULL;
+    const std::string name = to_std_string(ctx, argv[0]);
+    if (name == "overworld" || name == "minecraft:overworld" || name == "0") return JS_NewInt32(ctx, 0);
+    if (name == "nether" || name == "minecraft:nether" || name == "1") return JS_NewInt32(ctx, 1);
+    if (name == "the_end" || name == "theend" || name == "minecraft:the_end" || name == "2") {
+        return JS_NewInt32(ctx, 2);
+    }
+    return JS_NULL;
+}
+
+JSValue mc_get_dimension_name(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_NULL;
+    int32_t dimension = 0;
+    if (JS_ToInt32(ctx, &dimension, argv[0]) < 0) return JS_EXCEPTION;
+    if (dimension < 0 || dimension > 2) return JS_NULL;
+    return JS_NewString(ctx, live_dimension_name(dimension));
+}
+
+JSValue mc_get_bds_version(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewString(ctx, "1.26.52.3");
+}
+
+JSValue mc_get_online_player_num(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewInt32(ctx, static_cast<int32_t>(players_online().size()));
+}
+
+JSValue mc_listen(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
+
+/* mc.spawnParticle(pos, name) / mc.spawnParticle(x, y, z, dimid, name). */
+JSValue mc_spawn_particle(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "spawnParticle(pos, name) requires a position and a name");
+    double x = 0.0, y = 0.0, z = 0.0;
+    int dimid = 0;
+    std::string name;
+    if (argc >= 5) {
+        if (!read_position_args(ctx, 4, argv, x, y, z, dimid, 0)) {
+            return JS_ThrowTypeError(ctx, "spawnParticle(x, y, z, dimid, name) requires numeric coordinates");
+        }
+        name = to_std_string(ctx, argv[4]);
+    } else {
+        if (!read_position_args(ctx, 1, argv, x, y, z, dimid, 0)) {
+            return JS_ThrowTypeError(ctx, "spawnParticle(pos, name) requires a position object");
+        }
+        name = to_std_string(ctx, argv[1]);
+    }
+    bool any = false;
+    for (const auto& info : players_online()) {
+        if (info.handle != nullptr && live_spawn_particle(info.handle, name, LiveVec3{x, y, z})) {
+            any = true;
+        }
+    }
+    return JS_NewBool(ctx, any);
+}
+
+/* mc.setTime(ticks) / mc.getTime() — client-visible world time. */
+JSValue mc_set_time(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setTime(ticks) requires a tick count");
+    int32_t ticks = 0;
+    if (JS_ToInt32(ctx, &ticks, argv[0]) < 0) return JS_EXCEPTION;
+    bool any = false;
+    for (const auto& info : players_online()) {
+        if (info.handle != nullptr && live_set_time(info.handle, ticks)) {
+            any = true;
+        }
+    }
+    return JS_NewBool(ctx, any);
+}
+
+/* mc.setWeather(0 clear | 1 rain | 2 thunder). */
+JSValue mc_set_weather(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setWeather(id) requires 0, 1 or 2");
+    int32_t weather = 0;
+    if (JS_ToInt32(ctx, &weather, argv[0]) < 0) return JS_EXCEPTION;
+    bool any = false;
+    for (const auto& info : players_online()) {
+        if (info.handle != nullptr && live_set_weather(info.handle, weather)) {
+            any = true;
+        }
+    }
+    return JS_NewBool(ctx, any);
+}
+
+/*
+ * mc.runcmd runs through the CommandRequest pipeline, using the player's own
+ * NetworkIdentifier so permission checks behave as if the player typed it.
+ */
+JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) {
+        return JS_ThrowTypeError(ctx, "runcmd(command) requires a command string");
+    }
+    /*
+     * The command packet path executes the command but then tears the server
+     * down: the dispatcher ends up owning state we cannot reproduce from
+     * outside the engine.  Until that is solved properly, refuse instead of
+     * crashing the process.  Player-facing commands are handled by
+     * intercepting "/" chat in plugins (see plugins/*.js).
+     */
+    /*
+     * Measured on 1.26.52.3: the dispatcher returns normally, then the server
+     * crashes on a later tick.  Verified not to be the packet lifetime (an
+     * immortal packet still crashes), and not the entity id (runtime id 1 is
+     * correct).  The remaining cause is state the network layer expects to own
+     * for a command it received itself, which cannot be synthesised from
+     * outside.  Refuse rather than ship a crash.
+     */
+    return JS_ThrowInternalError(
+        ctx,
+        "runcmd is not available on this build: dispatching a synthetic CommandRequestPacket executes "
+        "but leaves the server in an invalid state and it crashes on the next tick. "
+        "Use mc.regPlayerCmd for plugin commands.");
+}
+
+/* mc.getTime(TimeID): 0 daytime, 1 gametime, 2 day.  Read from packets. */
+JSValue mc_get_time(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    int32_t kind = 0;
+    if (argc > 0) {
+        JS_ToInt32(ctx, &kind, argv[0]);
+    }
+    const int ticks = packet_world_time();
+    if (ticks < 0) {
+        return JS_ThrowInternalError(
+            ctx, "getTime needs an observed SetTimePacket; call mc.setTime first or wait for a tick update");
+    }
+    const int day = ticks / 24000;
+    switch (kind) {
+    case 1: return JS_NewInt32(ctx, ticks % 24000);
+    case 2: return JS_NewInt32(ctx, day);
+    default: return JS_NewInt32(ctx, ticks);
+    }
+}
+
+/* mc.getWeather(): 0 sunny, 1 rain, 2 thunder. */
+JSValue mc_get_weather(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    const int weather = packet_world_weather();
+    if (weather < 0) {
+        return JS_ThrowInternalError(
+            ctx, "getWeather needs an observed weather update; call mc.setWeather first");
+    }
+    return JS_NewInt32(ctx, weather);
+}
+
+/*
+ * mc.getBlock(pos) / mc.getBlock(x, y, z, dimid).
+ *
+ * BDS does not expose a BlockSource entry point with a stable signature, so
+ * the block is read from the UpdateBlock traffic the server already sent this
+ * client.  That is real data the client is rendering; the only limitation is
+ * that a chunk the client never loaded has no entry.
+ */
+JSValue mc_get_block(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    double x = 0, y = 0, z = 0;
+    int dimid = 0;
+    if (!read_position_args(ctx, argc, argv, x, y, z, dimid, 0)) {
+        return JS_ThrowTypeError(ctx, "getBlock(pos) or getBlock(x, y, z[, dimid]) requires a position");
+    }
+    const int bx = static_cast<int>(std::floor(x));
+    const int by = static_cast<int>(std::floor(y));
+    const int bz = static_cast<int>(std::floor(z));
+    uint32_t runtime_id = 0;
+    int flags = 0;
+    if (!packet_block_at(bx, by, bz, runtime_id, flags)) {
+        return JS_NULL;
+    }
+    JSValue block = make_block_object(ctx, bx, by, bz, dimid);
+    JS_SetPropertyStr(ctx, block, "runtimeId", JS_NewInt64(ctx, static_cast<int64_t>(runtime_id)));
+    JS_SetPropertyStr(ctx, block, "isAir", JS_NewBool(ctx, runtime_id == 0));
+    return block;
+}
+
+/*
+ * mc.setBlock(pos, name) / mc.setBlock(x, y, z, dimid, name[, runtimeId]).
+ *
+ * Sends UpdateBlockPacket to every online player.  The server's own world data
+ * is not modified, so re-entering the chunk restores the original block; this
+ * is a client-visible change only, which is the honest limit of doing this
+ * without a BlockSource entry point.
+ */
+JSValue mc_set_block(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    double x = 0, y = 0, z = 0;
+    int dimid = 0;
+    std::string name;
+    int32_t runtime_id = -1;
+    if (argc >= 5) {
+        if (!read_position_args(ctx, 4, argv, x, y, z, dimid, 0)) {
+            return JS_ThrowTypeError(ctx, "setBlock requires numeric coordinates");
+        }
+        name = to_std_string(ctx, argv[4]);
+        if (argc > 5) JS_ToInt32(ctx, &runtime_id, argv[5]);
+    } else if (argc >= 2) {
+        if (!read_position_args(ctx, 1, argv, x, y, z, dimid, 0)) {
+            return JS_ThrowTypeError(ctx, "setBlock(pos, name) requires a position object");
+        }
+        name = to_std_string(ctx, argv[1]);
+        if (argc > 2) JS_ToInt32(ctx, &runtime_id, argv[2]);
+    } else {
+        return JS_ThrowTypeError(ctx, "setBlock(pos, name) requires a position and a block name");
+    }
+    (void)name;
+    if (runtime_id < 0) {
+        return JS_ThrowInternalError(
+            ctx,
+            "setBlock needs an explicit block runtime id: the block-name table is version specific, "
+            "so call setBlock(pos, name, runtimeId)");
+    }
+    const int bx = static_cast<int>(std::floor(x));
+    const int by = static_cast<int>(std::floor(y));
+    const int bz = static_cast<int>(std::floor(z));
+    bool any = false;
+    for (const auto& info : players_online()) {
+        if (info.handle != nullptr &&
+            live_set_block(info.handle, bx, by, bz, static_cast<uint32_t>(runtime_id), 0)) {
+            any = true;
+        }
+    }
+    return JS_NewBool(ctx, any);
+}
+
 JSValue mc_unsupported(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-    return unsupported(ctx, "this mc function is not implemented for the current BDS build");
+    return JS_ThrowInternalError(
+        ctx,
+        "this mc function is not implemented: it needs a version-specific engine object layout. "
+        "See wiki/versions.md.");
+}
+
+/*
+ * Named stubs for the LLSE surface we do not implement.  A plugin migrating
+ * from LLSE gets a precise "not supported on this build" message instead of
+ * "undefined is not a function", which makes the gap visible immediately.
+ */
+/*
+ * Every unimplemented LLSE entry point lands here.  The message names the API
+ * and points at the reason, so a migrating plugin author sees exactly what is
+ * missing instead of "undefined is not a function".
+ */
+JSValue mc_stub(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    (void)argc;
+    (void)argv;
+    return JS_ThrowInternalError(
+        ctx,
+        "this LegacyScriptEngine API is not implemented by YoyoLoader: it needs a version-specific "
+        "engine object layout (Container / ItemStack / ActorFactory / CommandOrigin). "
+        "See wiki/versions.md for the current capability matrix.");
+}
+
+/* mc.listen(EventClass) style is not supported; only string names are. */
+JSValue mc_listen_llse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc >= 2 && JS_IsString(argv[0])) {
+        return mc_listen(ctx, this_val, argc, argv);
+    }
+    return JS_ThrowTypeError(ctx,
+                             "mc.listen(name, callback) expects an event name string; "
+                             "class-based event objects are not supported");
+}
+
+
+
+/*
+ * Test hook: feed a command through the same router a real CommandRequest
+ * packet uses.  Returns null when a plugin handled it.
+ */
+JSValue mc_simulate_command(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 2) {
+        return JS_ThrowTypeError(ctx, "mc.__simulateCommand(name, command) requires two arguments");
+    }
+    auto info = players_find(to_std_string(ctx, argv[0]));
+    if (!info.has_value() || info->handle == nullptr) {
+        return JS_ThrowInternalError(ctx, "no live player named %s", to_std_string(ctx, argv[0]).c_str());
+    }
+    PlayerView view;
+    view.handle = info->handle;
+    view.name = info->name;
+    view.xuid = info->xuid;
+    view.address = info->address;
+    view.runtime_id = info->runtime_id;
+    std::string command = to_std_string(ctx, argv[1]);
+    while (!command.empty() && (command.front() == '/' || command.front() == ' ')) {
+        command.erase(command.begin());
+    }
+    if (!js::has_player_command(command)) {
+        return JS_NewBool(ctx, false);
+    }
+    std::string output;
+    const bool handled = js::run_player_command(view, command, output);
+    if (!output.empty()) {
+        live_send_text(view.handle, output, LiveTextType::Raw);
+    }
+    return handled ? JS_NULL : JS_NewBool(ctx, false);
 }
 
 JSValue mc_simulate_chat(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -660,8 +1014,16 @@ void register_mc(JSContext* ctx) {
                       JS_NewCFunction(ctx, mc_get_online_count, "getOnlinePlayerCount", 0));
     JS_SetPropertyStr(ctx, mc, "getServerVersion",
                       JS_NewCFunction(ctx, mc_get_server_version, "getServerVersion", 0));
+    JS_SetPropertyStr(ctx, mc, "getBDSVersion",
+                      JS_NewCFunction(ctx, mc_get_bds_version, "getBDSVersion", 0));
     JS_SetPropertyStr(ctx, mc, "getModuleBase",
                       JS_NewCFunction(ctx, mc_get_module_base, "getModuleBase", 0));
+    JS_SetPropertyStr(ctx, mc, "getDimensionId",
+                      JS_NewCFunction(ctx, mc_get_dimension_id, "getDimensionId", 1));
+    JS_SetPropertyStr(ctx, mc, "getDimensionName",
+                      JS_NewCFunction(ctx, mc_get_dimension_name, "getDimensionName", 1));
+    JS_SetPropertyStr(ctx, mc, "getOnlinePlayerNum",
+                      JS_NewCFunction(ctx, mc_get_online_player_num, "getOnlinePlayerNum", 1));
     JS_SetPropertyStr(ctx, mc, "broadcast", JS_NewCFunction(ctx, mc_broadcast, "broadcast", 1));
     JS_SetPropertyStr(ctx, mc, "getLevel", JS_NewCFunction(ctx, mc_get_level, "getLevel", 0));
 
@@ -675,13 +1037,32 @@ void register_mc(JSContext* ctx) {
                       JS_NewCFunction(ctx, mc_worlds_is_controller, "isController", 0));
     JS_SetPropertyStr(ctx, worlds, "current", JS_NewCFunction(ctx, mc_worlds_current, "current", 0));
     JS_SetPropertyStr(ctx, mc, "worlds", worlds);
-    JS_SetPropertyStr(ctx, mc, "runcmd", JS_NewCFunction(ctx, mc_unsupported, "runcmd", 1));
-    JS_SetPropertyStr(ctx, mc, "runcmdEx", JS_NewCFunction(ctx, mc_unsupported, "runcmdEx", 1));
-    JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_unsupported, "getBlock", 1));
+    JS_SetPropertyStr(ctx, mc, "runcmd", JS_NewCFunction(ctx, mc_runcmd_unavailable, "runcmd", 1));
+    JS_SetPropertyStr(ctx, mc, "runcmdEx",
+                      JS_NewCFunction(ctx, mc_runcmd_unavailable, "runcmdEx", 1));
+    JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_get_block, "getBlock", 4));
+    JS_SetPropertyStr(ctx, mc, "setBlock", JS_NewCFunction(ctx, mc_set_block, "setBlock", 6));
+    JS_SetPropertyStr(ctx, mc, "spawnParticle", JS_NewCFunction(ctx, mc_spawn_particle, "spawnParticle", 5));
+    JS_SetPropertyStr(ctx, mc, "spawnItem", JS_NewCFunction(ctx, mc_stub, "spawnItem", 2));
+    JS_SetPropertyStr(ctx, mc, "spawnMob", JS_NewCFunction(ctx, mc_stub, "spawnMob", 2));
+    JS_SetPropertyStr(ctx, mc, "explode", JS_NewCFunction(ctx, mc_stub, "explode", 4));
+    JS_SetPropertyStr(ctx, mc, "getAllEntities", JS_NewCFunction(ctx, mc_stub, "getAllEntities", 0));
+    JS_SetPropertyStr(ctx, mc, "getEntities", JS_NewCFunction(ctx, mc_stub, "getEntities", 1));
+    JS_SetPropertyStr(ctx, mc, "getTime", JS_NewCFunction(ctx, mc_get_time, "getTime", 1));
+    JS_SetPropertyStr(ctx, mc, "setTime", JS_NewCFunction(ctx, mc_set_time, "setTime", 1));
+    JS_SetPropertyStr(ctx, mc, "getWeather", JS_NewCFunction(ctx, mc_get_weather, "getWeather", 0));
+    JS_SetPropertyStr(ctx, mc, "setWeather", JS_NewCFunction(ctx, mc_set_weather, "setWeather", 1));
+    JS_SetPropertyStr(ctx, mc, "getStructure", JS_NewCFunction(ctx, mc_stub, "getStructure", 2));
+    JS_SetPropertyStr(ctx, mc, "getPlayerNbt", JS_NewCFunction(ctx, mc_stub, "getPlayerNbt", 1));
+    JS_SetPropertyStr(ctx, mc, "setPlayerNbt", JS_NewCFunction(ctx, mc_stub, "setPlayerNbt", 2));
     JS_SetPropertyStr(ctx, mc, "getContainer", JS_NewCFunction(ctx, mc_unsupported, "getContainer", 1));
     JS_SetPropertyStr(ctx, mc, "getEntity", JS_NewCFunction(ctx, mc_unsupported, "getEntity", 1));
     JS_SetPropertyStr(ctx, mc, "__simulateChat",
                       JS_NewCFunction(ctx, mc_simulate_chat, "__simulateChat", 2));
+    JS_SetPropertyStr(ctx, mc, "__simulateCommand",
+                      JS_NewCFunction(ctx, mc_simulate_command, "__simulateCommand", 2));
+    JS_SetPropertyStr(ctx, mc, "__simulateCommand",
+                      JS_NewCFunction(ctx, mc_simulate_command, "__simulateCommand", 2));
     JS_SetPropertyStr(ctx, mc, "__rewriteNative",
                       JS_NewCFunction(ctx, mc_rewrite_native, "__rewriteNative", 1));
     JS_SetPropertyStr(ctx, mc, "version", JS_NewString(ctx, "0.2.0"));
@@ -704,34 +1085,6 @@ void register_mc(JSContext* ctx) {
     JS_FreeValue(ctx, global);
 }
 
-void load_js_plugins(JSContext* ctx) {
-    std::error_code error;
-    auto directory = std::filesystem::current_path(error) / "plugins";
-    if (error || !std::filesystem::is_directory(directory, error)) {
-        return;
-    }
-    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
-        if (error) break;
-        if (!entry.is_regular_file() || entry.path().extension() != ".js") continue;
-        std::ifstream file(entry.path(), std::ios::binary);
-        if (!file) {
-            log_write(LogLevel::Error, "cannot open JS plugin %s", entry.path().string().c_str());
-            continue;
-        }
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-        std::string source = buffer.str();
-        JSValue result = JS_Eval(ctx, source.data(), source.size(), entry.path().string().c_str(),
-                                 JS_EVAL_TYPE_GLOBAL);
-        if (JS_IsException(result)) {
-            log_exception(ctx);
-            log_write(LogLevel::Error, "JS plugin failed: %s", entry.path().string().c_str());
-        } else {
-            JS_FreeValue(ctx, result);
-            log_write(LogLevel::Info, "JS plugin loaded: %s", entry.path().string().c_str());
-        }
-    }
-}
 
 } // namespace
 
@@ -752,22 +1105,208 @@ void log_exception(JSContext* ctx) {
     JS_FreeValue(ctx, exception);
 }
 
+bool load_plugins(const std::vector<plugins::Manifest>& manifests) {
+    bool all_loaded = true;
+    for (const auto& manifest : manifests) {
+        const std::filesystem::path entry =
+            std::filesystem::path(manifest.directory) / manifest.entry;
+        std::ifstream file(entry, std::ios::binary);
+        if (!file) {
+            log_write(LogLevel::Error, "cannot open JS plugin %s", entry.string().c_str());
+            all_loaded = false;
+            continue;
+        }
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        const std::string source = buffer.str();
+
+        /*
+         * One context per plugin: own globals, own exception state, own timers.
+         * A plugin that throws at load is skipped without touching the others.
+         */
+        JSContext* plugin = JS_NewContext(g_runtime);
+        if (plugin == nullptr) {
+            log_write(LogLevel::Error, "cannot create a context for %s", entry.string().c_str());
+            all_loaded = false;
+            continue;
+        }
+        g_plugin_contexts.push_back(plugin);
+        JSContext* previous = g_context;
+        g_active = plugin;
+        g_context = plugin;
+        register_mc(plugin);
+        register_nbt(plugin);
+        register_forms(plugin);
+        register_llse_objects(plugin);
+        register_timers(plugin);
+        register_script_helpers(plugin);
+        register_commands(plugin);
+
+        /* Expose the plugin's own identity and writable data directory. */
+        JSValue global = JS_GetGlobalObject(plugin);
+        JSValue info = JS_NewObject(plugin);
+        JS_SetPropertyStr(plugin, info, "name", JS_NewString(plugin, manifest.name.c_str()));
+        JS_SetPropertyStr(plugin, info, "version", JS_NewString(plugin, manifest.version.c_str()));
+        JS_SetPropertyStr(plugin, info, "engine",
+                          JS_NewString(plugin, plugins::engine_name(manifest.engine)));
+        JS_SetPropertyStr(plugin, global, "__plugin", info);
+        JS_FreeValue(plugin, global);
+
+        JSValue result = JS_Eval(plugin, source.data(), source.size(), entry.string().c_str(),
+                                 JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(result)) {
+            log_exception(plugin);
+            log_write(LogLevel::Error, "JS plugin '%s' failed at load (isolated): %s",
+                      manifest.name.c_str(), entry.string().c_str());
+            all_loaded = false;
+        } else {
+            JS_FreeValue(plugin, result);
+            log_write(LogLevel::Info, "JS plugin loaded: %s v%s (%s)", manifest.name.c_str(),
+                      manifest.version.c_str(), entry.string().c_str());
+        }
+        g_context = previous;
+        g_active = previous;
+    }
+    return all_loaded;
+}
+
 JSValue unsupported(JSContext* ctx, const char* message) {
     return JS_ThrowInternalError(ctx, "%s", message);
 }
 
+/* LLSE sendText/tell accept an optional type (0 chat, 1 tip, 5 popup...). */
+JSValue player_send_text(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "tell(message[, type]) requires a message");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    const std::string message = to_std_string(ctx, argv[0]);
+    int32_t type = 0;
+    if (argc > 1) {
+        JS_ToInt32(ctx, &type, argv[1]);
+    }
+    LiveTextType mapped = LiveTextType::Raw;
+    switch (type) {
+    case 1: mapped = LiveTextType::Tip; break;
+    case 4: mapped = LiveTextType::SystemMessage; break;
+    case 5: mapped = LiveTextType::Popup; break;
+    default: mapped = LiveTextType::Raw; break;
+    }
+    return JS_NewBool(ctx, live_send_text(handle, message, mapped));
+}
+
+/* LLSE setTitle(content[, type[, fadeIn, stay, fadeOut]]). */
+JSValue player_set_title_llse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    const std::string content = argc > 0 ? to_std_string(ctx, argv[0]) : "";
+    int32_t type = 0;
+    int32_t fade_in = 10;
+    int32_t stay = 70;
+    int32_t fade_out = 20;
+    if (argc > 1) JS_ToInt32(ctx, &type, argv[1]);
+    if (argc > 2) JS_ToInt32(ctx, &fade_in, argv[2]);
+    if (argc > 3) JS_ToInt32(ctx, &stay, argv[3]);
+    if (argc > 4) JS_ToInt32(ctx, &fade_out, argv[4]);
+    switch (type) {
+    case 1: /* actionbar */
+        return JS_NewBool(ctx, live_send_actionbar(handle, content));
+    case 2: /* subtitle only */
+        return JS_NewBool(ctx, live_send_title(handle, "", content, fade_in, stay, fade_out));
+    default: /* 0 = title */
+        return JS_NewBool(ctx, live_send_title(handle, content, "", fade_in, stay, fade_out));
+    }
+}
+
+/* LLSE: pl.teleport(pos[, rot]) or pl.teleport(x, y, z, dimid[, rot]). */
+JSValue player_teleport_llse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (!capability_enabled(&VersionCapabilities::player_teleport)) return throw_capability(ctx, "teleport");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    if (argc < 1) return JS_ThrowTypeError(ctx, "teleport(pos) or teleport(x, y, z, dimid) requires coordinates");
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    int dimid = live_get_dimension(handle);
+    if (!read_position_args(ctx, argc, argv, x, y, z, dimid, dimid)) {
+        return JS_ThrowTypeError(ctx, "teleport requires a position object or x, y, z[, dimid]");
+    }
+    LiveVec3 position{x, y, z};
+    return JS_NewBool(ctx, live_teleport(handle, position, dimid));
+}
+
+/* LLSE has no getPosition(); it exposes pos / feetPos / blockPos properties. */
+JSValue player_get_feet_position(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "feetPos");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    LiveVec3 position;
+    if (!live_get_feet_position(handle, position)) return JS_NULL;
+    return make_float_pos(ctx, position.x, position.y, position.z, live_get_dimension(handle));
+}
+
+JSValue player_get_block_position(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "blockPos");
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    LiveVec3 position;
+    if (!live_get_feet_position(handle, position)) return JS_NULL;
+    return make_int_pos(ctx, static_cast<int>(std::floor(position.x)), static_cast<int>(std::floor(position.y)),
+                        static_cast<int>(std::floor(position.z)), live_get_dimension(handle));
+}
+
+/* LLSE: pl.isOP() checks the XUID against yoyo_ops.txt. */
+JSValue player_is_op(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    JSValue xuid = JS_GetPropertyStr(ctx, this_val, "xuid");
+    const char* text = JS_ToCString(ctx, xuid);
+    const std::string value = text ? text : "";
+    if (text) JS_FreeCString(ctx, text);
+    JS_FreeValue(ctx, xuid);
+    return JS_NewBool(ctx, worlds::is_op(value));
+}
+
+/* LLSE: pl.runcmd(cmd) is not implemented; fail loudly instead of silently. */
+JSValue player_runcmd_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_ThrowInternalError(
+        ctx, "runcmd is not implemented by YoyoLoader yet (see docs/API_COVERAGE.md)");
+}
+
+/*
+ * Inventory access needs the live Container/ItemStack ABI, which is one of the
+ * most version-fragile parts of BDS.  Until that is reverse engineered per
+ * build, this refuses by name instead of returning an empty container that
+ * would silently break plugin logic.
+ */
+JSValue player_inventory_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_ThrowInternalError(
+        ctx,
+        "inventory access (giveItem/getInventory/getArmor/getEnderChest) is not implemented by "
+        "YoyoLoader: it needs the version-specific Container/ItemStack layout");
+}
+
+JSValue player_nbt_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_ThrowInternalError(
+        ctx, "player NBT is not implemented by YoyoLoader: full player NBT serialisation is the most "
+             "version-fragile area of BDS");
+}
+
 JSValue player_send_form(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 1 || !JS_IsObject(argv[0])) {
-        return JS_ThrowTypeError(ctx, "sendForm(form) requires a form object");
+        return JS_ThrowTypeError(ctx, "sendForm(form[, callback]) requires a form object");
     }
     JSValue function = JS_GetPropertyStr(ctx, argv[0], "sendTo");
     if (!JS_IsFunction(ctx, function)) {
         JS_FreeValue(ctx, function);
         return JS_ThrowTypeError(ctx, "form.sendTo(player) is not available");
     }
-    JSValue args[1] = {JS_DupValue(ctx, this_val)};
-    JSValue result = JS_Call(ctx, function, argv[0], 1, args);
+    JSValue args[2] = {JS_DupValue(ctx, this_val), JS_UNDEFINED};
+    int arg_count = 1;
+    if (argc > 1 && JS_IsFunction(ctx, argv[1])) {
+        args[1] = JS_DupValue(ctx, argv[1]);
+        arg_count = 2;
+    }
+    JSValue result = JS_Call(ctx, function, argv[0], arg_count, args);
     JS_FreeValue(ctx, args[0]);
+    JS_FreeValue(ctx, args[1]);
     JS_FreeValue(ctx, function);
     if (JS_IsException(result)) {
         log_exception(ctx);
@@ -805,8 +1344,10 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
                       JS_NewCFunction(ctx, player_send_actionbar, "send_actionbar", 1));
     JS_SetPropertyStr(ctx, object, "resetTitle", JS_NewCFunction(ctx, player_reset_title, "resetTitle", 0));
     JS_SetPropertyStr(ctx, object, "reset_title", JS_NewCFunction(ctx, player_reset_title, "reset_title", 0));
-    JS_SetPropertyStr(ctx, object, "sendForm", JS_NewCFunction(ctx, player_send_form, "sendForm", 1));
-    JS_SetPropertyStr(ctx, object, "send_form", JS_NewCFunction(ctx, player_send_form, "send_form", 1));
+    JS_SetPropertyStr(ctx, object, "sendForm", JS_NewCFunction(ctx, player_send_form, "sendForm", 2));
+    JS_SetPropertyStr(ctx, object, "send_form", JS_NewCFunction(ctx, player_send_form, "send_form", 2));
+    JS_SetPropertyStr(ctx, object, "sendModalForm",
+                      JS_NewCFunction(ctx, player_send_modal_form, "sendModalForm", 5));
     JS_SetPropertyStr(ctx, object, "kick", JS_NewCFunction(ctx, player_kick, "kick", 1));
     JS_SetPropertyStr(ctx, object, "transfer", JS_NewCFunction(ctx, player_transfer, "transfer", 2));
     JS_SetPropertyStr(ctx, object, "getPosition", JS_NewCFunction(ctx, player_get_position, "getPosition", 0));
@@ -848,12 +1389,79 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
     JS_SetPropertyStr(ctx, object, "get_health", JS_NewCFunction(ctx, player_get_health, "get_health", 0));
     JS_SetPropertyStr(ctx, object, "getNbt", JS_NewCFunction(ctx, player_unsupported, "getNbt", 0));
     JS_SetPropertyStr(ctx, object, "toString", JS_NewCFunction(ctx, player_to_string, "toString", 0));
+
+    /*
+     * LegacyScriptEngine surface.  These names are what existing LLSE plugins
+     * call, so they are registered alongside the YoyoLoader ones rather than
+     * replacing them.
+     */
+    JS_SetPropertyStr(ctx, object, "tell", JS_NewCFunction(ctx, player_send_text, "tell", 2));
+    JS_SetPropertyStr(ctx, object, "sendText", JS_NewCFunction(ctx, player_send_text, "sendText", 2));
+    JS_SetPropertyStr(ctx, object, "setTitle", JS_NewCFunction(ctx, player_set_title_llse, "setTitle", 5));
+    JS_SetPropertyStr(ctx, object, "getPos", JS_NewCFunction(ctx, player_get_feet_position, "getPos", 0));
+    JS_SetPropertyStr(ctx, object, "getFeetPos", JS_NewCFunction(ctx, player_get_feet_position, "getFeetPos", 0));
+    JS_SetPropertyStr(ctx, object, "getBlockPos", JS_NewCFunction(ctx, player_get_block_position, "getBlockPos", 0));
+    JS_SetPropertyStr(ctx, object, "getDirection", JS_NewCFunction(ctx, player_get_rotation, "getDirection", 0));
+    JS_SetPropertyStr(ctx, object, "isOP", JS_NewCFunction(ctx, player_is_op, "isOP", 0));
+    JS_SetPropertyStr(ctx, object, "runcmd", JS_NewCFunction(ctx, player_runcmd_stub, "runcmd", 1));
+    JS_SetPropertyStr(ctx, object, "isSneaking_llse", JS_NewCFunction(ctx, player_is_sneaking, "isSneaking", 0));
+    JS_SetPropertyStr(ctx, object, "giveItem",
+                      JS_NewCFunction(ctx, player_inventory_stub, "giveItem", 2));
+    JS_SetPropertyStr(ctx, object, "getInventory",
+                      JS_NewCFunction(ctx, player_inventory_stub, "getInventory", 0));
+    JS_SetPropertyStr(ctx, object, "getArmor",
+                      JS_NewCFunction(ctx, player_inventory_stub, "getArmor", 0));
+    JS_SetPropertyStr(ctx, object, "getEnderChest",
+                      JS_NewCFunction(ctx, player_inventory_stub, "getEnderChest", 0));
+    JS_SetPropertyStr(ctx, object, "getNbt",
+                      JS_NewCFunction(ctx, player_nbt_stub, "getNbt", 0));
+    JS_SetPropertyStr(ctx, object, "setNbt",
+                      JS_NewCFunction(ctx, player_nbt_stub, "setNbt", 1));
+
+    /* pos / feetPos / blockPos as properties, matching LLSE. */
+    JSValue pos_getter = JS_NewCFunction(ctx,
+                                         [](JSContext* c, JSValueConst this_val, int, JSValueConst*) -> JSValue {
+                                             void* handle = player_handle(c, this_val);
+                                             if (handle == nullptr) return JS_NULL;
+                                             LiveVec3 position;
+                                             if (!live_get_position(handle, position)) return JS_NULL;
+                                             return make_float_pos(c, position.x, position.y, position.z,
+                                                                   live_get_dimension(handle));
+                                         },
+                                         "get pos", 0);
+    JSValue feet_getter = JS_NewCFunction(ctx,
+                                          [](JSContext* c, JSValueConst this_val, int, JSValueConst*) {
+                                              return player_get_feet_position(c, this_val, 0, nullptr);
+                                          },
+                                          "get feetPos", 0);
+    JSValue block_getter = JS_NewCFunction(ctx,
+                                           [](JSContext* c, JSValueConst this_val, int, JSValueConst*) {
+                                               return player_get_block_position(c, this_val, 0, nullptr);
+                                           },
+                                           "get blockPos", 0);
+    JSValue dir_getter = JS_NewCFunction(ctx,
+                                         [](JSContext* c, JSValueConst this_val, int, JSValueConst*) -> JSValue {
+                                             void* handle = player_handle(c, this_val);
+                                             if (handle == nullptr) return JS_NULL;
+                                             float pitch = 0.0f;
+                                             float yaw = 0.0f;
+                                             if (!live_get_rotation(handle, pitch, yaw)) return JS_NULL;
+                                             return make_direction(c, pitch, yaw);
+                                         },
+                                         "get direction", 0);
+    JS_DefinePropertyGetSet(ctx, object, JS_NewAtom(ctx, "pos"), pos_getter, JS_UNDEFINED,
+                            JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, object, JS_NewAtom(ctx, "feetPos"), feet_getter, JS_UNDEFINED,
+                            JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, object, JS_NewAtom(ctx, "blockPos"), block_getter, JS_UNDEFINED,
+                            JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, object, JS_NewAtom(ctx, "direction"), dir_getter, JS_UNDEFINED,
+                            JS_PROP_ENUMERABLE);
     return object;
 }
 
 bool has_listener(std::string_view event) {
     std::lock_guard lock(g_mutex);
-    if (g_context == nullptr) return false;
     const std::string name = normalize_event(std::string(event));
     auto it = g_listeners.find(name);
     return it != g_listeners.end() && !it->second.empty();
@@ -885,8 +1493,11 @@ bool start() {
     register_nbt(g_context);
     log_write(LogLevel::Info, "JS registering forms");
     register_forms(g_context);
-    log_write(LogLevel::Info, "JS loading plugins");
-    load_js_plugins(g_context);
+    log_write(LogLevel::Info, "JS registering timers and helpers");
+    register_llse_objects(g_context);
+    register_timers(g_context);
+    register_script_helpers(g_context);
+    register_commands(g_context);
     log_write(LogLevel::Info, "QuickJS ready");
     return true;
 }
@@ -894,10 +1505,22 @@ bool start() {
 void stop() {
     std::lock_guard lock(g_mutex);
     if (g_context != nullptr) {
+        clear_timers();
+        clear_form_callbacks();
+        clear_commands();
+        close_files();
         for (auto& [name, listeners] : g_listeners) {
-            for (JSValue fn : listeners) JS_FreeValue(g_context, fn);
+            for (auto& listener : listeners) {
+                if (listener.ctx != nullptr) {
+                    JS_FreeValue(listener.ctx, listener.fn);
+                }
+            }
         }
         g_listeners.clear();
+        for (JSContext* plugin : g_plugin_contexts) {
+            JS_FreeContext(plugin);
+        }
+        g_plugin_contexts.clear();
         JS_FreeContext(g_context);
         g_context = nullptr;
     }
@@ -989,14 +1612,18 @@ void dispatch_server_ready(std::string_view version, uintptr_t module_base) {
 void dispatch_tick(uint64_t tick) {
     std::lock_guard lock(g_mutex);
     if (g_context == nullptr) return;
-    auto it = g_listeners.find("onTick");
-    if (it == g_listeners.end() || it->second.empty()) return;
     JS_UpdateStackTop(g_runtime);
-    JSValue event = JS_NewObject(g_context);
-    JS_SetPropertyStr(g_context, event, "tick", JS_NewInt64(g_context, static_cast<int64_t>(tick)));
-    JSValue args[1] = {event};
-    call_listeners_locked("onTick", 1, args);
-    JS_FreeValue(g_context, event);
+    auto it = g_listeners.find("onTick");
+    if (it != g_listeners.end() && !it->second.empty()) {
+        JSValue event = JS_NewObject(g_context);
+        JS_SetPropertyStr(g_context, event, "tick", JS_NewInt64(g_context, static_cast<int64_t>(tick)));
+        JSValue args[1] = {event};
+        call_listeners_locked("onTick", 1, args);
+        JS_FreeValue(g_context, event);
+    }
+    /* Timers are drained after onTick on the game thread, so timer callbacks
+     * may send packets or touch world state. */
+    run_timers();
 }
 
 void dispatch_player_move(const PlayerView& player, const LiveVec3& from, const LiveVec3& to,
@@ -1066,13 +1693,7 @@ const char* detail_event_name(int type) {
 }
 
 JSValue make_position(JSContext* ctx, int x, int y, int z, int dimension) {
-    JSValue object = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, object, "x", JS_NewInt32(ctx, x));
-    JS_SetPropertyStr(ctx, object, "y", JS_NewInt32(ctx, y));
-    JS_SetPropertyStr(ctx, object, "z", JS_NewInt32(ctx, z));
-    JS_SetPropertyStr(ctx, object, "dimension", JS_NewInt32(ctx, dimension));
-    JS_SetPropertyStr(ctx, object, "dimensionName", JS_NewString(ctx, live_dimension_name(dimension)));
-    return object;
+    return make_int_pos(ctx, x, y, z, dimension);
 }
 
 } // namespace
@@ -1117,6 +1738,9 @@ void dispatch_detail(int type, const PlayerView& player, const DetailEvent& deta
     case YOYO_EVENT_ITEM_USE_ON:
     case YOYO_EVENT_BED_ENTER:
     case YOYO_EVENT_BED_LEAVE:
+        /* LLSE passes a Block object here, not a bare position. */
+        args[argc++] = make_block_object(g_context, detail.x, detail.y, detail.z, dimension);
+        break;
     case YOYO_EVENT_PLAYER_INTERACT:
     case YOYO_EVENT_PLAYER_ATTACK:
         args[argc++] = make_position(g_context, detail.x, detail.y, detail.z, dimension);

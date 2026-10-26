@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace yoyo {
@@ -41,15 +42,75 @@ struct LiveProfile {
     uint32_t join_flag_offset = 0;
 };
 
+/*
+ * Per-version capability switches.
+ *
+ * Everything defaults to false: a feature is only enabled when a version entry
+ * explicitly turns it on.  This keeps a partially understood build from
+ * silently running operations whose offsets were never verified for it.
+ *
+ * Rule (see PROJECT_RULES.md 1.4): when adding a capability, set it explicitly
+ * in every known version, and gate every call site on it.
+ */
+struct VersionCapabilities {
+    /* Hooks.  These need a resolved target and a verified prologue. */
+    bool hook_pre_join = false;
+    bool hook_leave = false;
+    bool hook_join = false;
+    bool hook_chat = false;
+    bool hook_level_tick = false;
+    bool hook_packet_factory = false;
+    bool hook_packet_send = false;
+
+    /* Features that depend on object layout or packet field offsets. */
+    bool player_position = false;   /* state vector + dimension */
+    bool player_rotation = false;
+    bool player_identity = false;   /* runtime id / unique id via EnTT */
+    bool player_game_mode = false;
+    bool player_teleport = false;   /* needs a writable teleport path */
+    bool player_set_game_mode = false;
+    bool player_health = false;     /* outgoing SetHealth packet */
+    bool packet_text_fields = false;
+    bool form_response_fields = false;
+    bool player_action_fields = false;
+    bool player_auth_input_fields = false;
+
+    /* Human-readable note shown when a feature is unavailable. */
+    const char* note = nullptr;
+};
+
 struct VersionProfile {
+    /* Marketing version, e.g. "1.26.52.3".  Shown in reports. */
+    const char* version = nullptr;
     const char* build_id = nullptr;
+    /* Platform label: "windows" / "linux". */
+    const char* platform = nullptr;
     Prologue try_to_load_player;
     Prologue disconnect_client;
     Prologue set_local_player_initialized;
     Prologue text_packet;
     LiveProfile live;
+    VersionCapabilities capabilities;
 };
 
 const VersionProfile* find_profile(const char* build_id);
+
+/* All profiles compiled into this build, for reporting and lookup by id. */
+const VersionProfile* all_profiles(size_t& count);
+
+/*
+ * Layout used when the running build has no exact profile.  Object and packet
+ * offsets are compiler/ABI dependent rather than version dependent, so the
+ * closest known layout usually still reads correctly; writes that would
+ * corrupt state are disabled by the live bridge when the layout is a fallback.
+ */
+const LiveProfile* fallback_layout();
+
+/*
+ * Capabilities applied to an unknown build.  Hooks may still be recovered by
+ * signature, but every layout-dependent feature starts disabled until the
+ * runtime layout check passes.
+ */
+VersionCapabilities conservative_capabilities();
 
 } // namespace yoyo

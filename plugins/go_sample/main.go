@@ -7,6 +7,7 @@ package main
 
 void yoyo_register_go_callbacks(const yoyo_api* api);
 void yoyo_go_send_join_message(const yoyo_api* api, void* player, const char* message);
+void yoyo_go_log(const yoyo_api* api, int level, const char* message);
 */
 import "C"
 
@@ -59,7 +60,7 @@ func yoyo_plugin_entry(api *C.yoyo_api) *C.yoyo_api {
 	C.yoyo_register_go_callbacks(api)
 	message := C.CString("sample_go plugin loaded")
 	defer C.free(unsafe.Pointer(message))
-	api.log(0, message)
+	C.yoyo_go_log(api, 0, message)
 	return api
 }
 

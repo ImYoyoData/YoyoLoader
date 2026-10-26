@@ -24,6 +24,8 @@ set(YOYO_RUNTIME_SOURCES
     src/runtime/module.cpp
     src/runtime/native_string.cpp
     src/runtime/version.cpp
+    src/runtime/signatures.cpp
+    src/runtime/capabilities.cpp
     src/runtime/hook_engine.cpp
     src/runtime/hooks.cpp
     src/runtime/live.cpp
@@ -31,11 +33,16 @@ set(YOYO_RUNTIME_SOURCES
     src/runtime/worlds.cpp
     src/runtime/events.cpp
     src/runtime/plugin_loader.cpp
+    src/runtime/plugin_manifest.cpp
     src/runtime/players.cpp
     src/runtime/nbt/nbt.cpp
     src/runtime/js/js_engine.cpp
     src/runtime/js/js_nbt.cpp
     src/runtime/js/js_forms.cpp
+    src/runtime/js/js_timers.cpp
+    src/runtime/js/js_script.cpp
+    src/runtime/js/js_compat.cpp
+    src/runtime/js/js_commands.cpp
     ${YOYO_QUICKJS_SOURCES}
 )
 

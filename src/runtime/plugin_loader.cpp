@@ -1,5 +1,7 @@
 #include "plugin_loader.h"
 
+#include "plugin_manifest.h"
+
 #include "events.h"
 #include "js/js_engine.h"
 #include "live.h"
@@ -252,36 +254,38 @@ void loader_thread() {
 #endif
     }
 
-    std::vector<std::filesystem::path> candidates;
-    for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
-        if (ec) {
-            break;
-        }
-        if (!entry.is_regular_file()) {
-            continue;
-        }
-        std::string extension = entry.path().extension().string();
-#ifdef _WIN32
-        if (extension == ".dll")
-#else
-        if (extension == ".so")
-#endif
-        {
-            std::string stem = entry.path().stem().string();
-            if (stem.find("yoyo_runtime") != std::string::npos || stem.find("yoyo_loader") != std::string::npos) {
-                continue;
-            }
-            candidates.push_back(entry.path());
-        }
+    /*
+     * Manifest-driven discovery.  Dependencies are ordered, cycles are
+     * rejected, and loose .js files are adopted into their own directory with
+     * a generated manifest so JS plugins need no packaging step.
+     */
+    std::vector<std::string> skipped;
+    const auto manifests = plugins::discover(to_utf8(directory), skipped);
+    for (const auto& reason : skipped) {
+        log_write(LogLevel::Warn, "plugin not loaded: %s", reason.c_str());
     }
 
-    for (const auto& path : candidates) {
-        load_one(path);
-    }
-    log_write(LogLevel::Info, "plugin loader finished, %zu candidate(s)", candidates.size());
+    size_t native_loaded = 0;
+    size_t js_count = 0;
     if (!js::start()) {
         log_write(LogLevel::Error, "JavaScript engine failed to start");
     }
+    std::vector<plugins::Manifest> js_plugins;
+    for (const auto& manifest : manifests) {
+        if (manifest.engine == plugins::Engine::Javascript) {
+            js_plugins.push_back(manifest);
+            ++js_count;
+            continue;
+        }
+        const std::filesystem::path entry = std::filesystem::path(manifest.directory) / manifest.entry;
+        load_one(entry);
+        ++native_loaded;
+    }
+    if (!js::load_plugins(js_plugins)) {
+        log_write(LogLevel::Error, "one or more JavaScript plugins failed to load");
+    }
+    log_write(LogLevel::Info, "plugin loader finished: %zu native, %zu javascript, %zu skipped",
+              native_loaded, js_count, skipped.size());
     emit_server_ready(state().module.build_id, state().module.base);
 #ifdef _WIN32
     return 0;

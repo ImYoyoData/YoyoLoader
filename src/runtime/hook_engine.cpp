@@ -274,6 +274,72 @@ bool install_inline_hook_reloc(InlineHook& hook,
     return true;
 }
 
+bool install_inline_hook_masked(InlineHook& hook,
+                                void* target,
+                                const uint8_t* expected,
+                                const uint8_t* mask,
+                                size_t expected_length,
+                                void* detour,
+                                size_t rip_offset,
+                                size_t rip_instruction_length) {
+    if (target == nullptr || expected == nullptr || mask == nullptr || detour == nullptr ||
+        expected_length < kJumpSize || expected_length > sizeof(hook.original)) {
+        return false;
+    }
+    auto* code = static_cast<uint8_t*>(target);
+    for (size_t i = 0; i < expected_length; ++i) {
+        if (mask[i] != 0 && code[i] != expected[i]) {
+            return false;
+        }
+    }
+
+    /* A RIP-relative instruction in the copied prologue needs a relocated
+     * displacement and a trampoline within +/-2 GB of the target. */
+    const bool relocate = rip_offset != 0 && rip_offset + sizeof(int32_t) <= expected_length;
+    void* trampoline = relocate ? alloc_executable_near(code, expected_length + 32)
+                                : alloc_executable(expected_length + kJumpSize);
+    if (trampoline == nullptr) {
+        return false;
+    }
+    auto* tramp = static_cast<uint8_t*>(trampoline);
+    std::memcpy(tramp, code, expected_length);
+    if (relocate) {
+        int32_t old_disp = 0;
+        std::memcpy(&old_disp, code + rip_offset, sizeof(old_disp));
+        const auto old_effective =
+            reinterpret_cast<intptr_t>(code + rip_offset + sizeof(int32_t)) + old_disp;
+        const auto new_disp_value =
+            old_effective - (reinterpret_cast<intptr_t>(tramp + rip_offset + sizeof(int32_t)));
+        if (new_disp_value < INT32_MIN || new_disp_value > INT32_MAX) {
+            free_executable(trampoline, expected_length + 32);
+            return false;
+        }
+        const auto new_disp = static_cast<int32_t>(new_disp_value);
+        std::memcpy(tramp + rip_offset, &new_disp, sizeof(new_disp));
+    }
+    write_absolute_jump(tramp + expected_length,
+                        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(target) + expected_length));
+
+    uintptr_t old_state = 0;
+    if (!make_writable(code, expected_length, old_state)) {
+        free_executable(trampoline, expected_length + 32);
+        return false;
+    }
+    std::memcpy(hook.original, code, expected_length);
+    write_absolute_jump(code, detour);
+    for (size_t i = kJumpSize; i < expected_length; ++i) {
+        code[i] = 0x90;
+    }
+    flush_code(code, expected_length);
+    restore_protection(code, expected_length, old_state);
+
+    hook.target = target;
+    hook.trampoline = trampoline;
+    hook.patch_length = expected_length;
+    hook.installed = true;
+    return true;
+}
+
 bool install_inline_hook_short(InlineHook& hook,
                                void* target,
                                const uint8_t* expected,

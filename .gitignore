@@ -23,3 +23,16 @@ _tools/
 .venv*/
 __pycache__/
 *.pyc
+
+selftest/
+
+_bds/
+_bot2/
+
+_bds/
+_bot*/
+
+dist/
+
+_ci/
+_accept/

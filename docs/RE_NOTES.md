@@ -325,6 +325,32 @@ Windows 验证时，在 `version.cpp` 中填入两个 handler 的 RVA 和序言�
 - `PlayerEquipment(31)` payload 尾部是 `slot, selected_slot, container_id`；
   当前用相邻 0..8 整数对做启发式解析，没有硬编码描述符大小。
 
+## 8.1 跨版本定位（特征签名）
+
+RVA 表是“已知版本”的快路径，不是唯一入口。`src/runtime/signatures.cpp` 为每个 hook
+目标保存一条以函数入口为锚点的字节特征。
+
+设计要点：
+
+- 只固定 opcode 和寄存器操作数。栈帧大小（`sub rsp, imm32`）、帧指针偏移
+  （`lea rbp, [rsp+imm32]`）、参数溢出偏移、`cmp reg, imm32` 里的协议号全部通配成 `??`。
+  早期版本只通配了两个字节，导致 `disconnectClientWithMessage` 和 `_onPlayerLeft` 在
+  22 万字节的 `.text` 里各命中 2 次和 92 次，解析直接失败。把 4 字节立即数整体通配后
+  才唯一。
+- 解析顺序：先按 build id 找档案；有档案就先用 RVA，并用同一套掩码校验那里的字节；
+  校验不过再走特征。没有档案则全部走特征。
+- 特征必须唯一命中；命中后还要用掩码再验一遍入口字节。任何一步失败 → 该 hook 跳过，
+  不 patch，不影响其它功能。
+- Windows（MSVC）与 Linux（clang+libc++）的序言不同，特征表按平台分开。
+
+`.text` 里重复序言非常多（同一编译器的栈帧模板），所以特征必须覆盖到函数体开头有区分度
+的那几条指令。当前 Windows 七条特征在 1.26.52.3 上都唯一，且落在记录的 RVA 上。
+
+对象偏移无法靠入口特征保证，因此加了运行时布局校验：首个真实玩家出现时检查
+`state_vector`/`rotation` 组件指针可读、位置有限、pitch/yaw 合理、维度在 0..2。
+任一项失败就把布局标记为 Rejected，并永久禁用依赖布局的写操作（传送、设置游戏模式），
+读取仍然可用。未知版本会显式记录 `object layout is a fallback`。
+
 ## 9. 已知未完成项
 
 - `onChat` 的真实客户端链路仍需确认；测试 bot 的 TextPacket 在 BDS 聊天处理前被丢弃。
