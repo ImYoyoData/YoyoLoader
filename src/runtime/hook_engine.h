@@ -59,6 +59,22 @@ bool install_inline_hook_reloc(InlineHook& hook,
                                size_t instruction_length);
 
 /*
+ * Same as install_inline_hook but verifies only the bytes selected by `mask`
+ * (1 = must match).  Bytes outside the mask are still copied verbatim from the
+ * target into the trampoline, so instructions whose immediates change between
+ * builds (stack frame sizes, displacements) keep working while the opcode
+ * shape is still pinned.
+ */
+bool install_inline_hook_masked(InlineHook& hook,
+                                void* target,
+                                const uint8_t* expected,
+                                const uint8_t* mask,
+                                size_t expected_length,
+                                void* detour,
+                                size_t rip_offset = 0,
+                                size_t rip_instruction_length = 0);
+
+/*
  * Install an inline hook when the shortest safe prologue is 12 bytes (a
  * 12-byte `mov rax, imm64; jmp rax` patch is used instead of the usual
  * 14-byte indirect jump).  If `jcc_offset` is not zero, the 2-byte short

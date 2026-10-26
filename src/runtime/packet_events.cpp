@@ -760,43 +760,40 @@ bool install_packet_hooks() {
     if (g_packet_hook_installed) {
         return true;
     }
-    const auto* version = state().profile;
-    if (version == nullptr) {
-        log_write(LogLevel::Error, "cannot install packet hook: no version profile");
-        return false;
-    }
-    const auto& live = version->live;
-    if (live.create_packet.rva == 0 || live.create_packet_hook_length < 12) {
+    const auto& target = state().symbols.create_packet;
+    const auto* live = state().layout;
+    if (live == nullptr || !target.valid() || live->create_packet_hook_length < 12) {
         log_write(LogLevel::Warn, "packet factory hook is not described for this build");
         return false;
     }
-    void* target = reinterpret_cast<void*>(state().module.base + live.create_packet.rva);
+    void* address = reinterpret_cast<void*>(target.address);
     bool ok = false;
 #ifdef _WIN32
-    ok = install_inline_hook(g_create_packet_hook, target, live.create_packet.bytes,
-                             live.create_packet_hook_length,
-                             reinterpret_cast<void*>(&create_packet_detour));
+    ok = install_inline_hook_masked(g_create_packet_hook, address, target.patch_bytes, target.patch_mask,
+                                    live->create_packet_hook_length,
+                                    reinterpret_cast<void*>(&create_packet_detour));
 #else
     void* jcc_target = nullptr;
-    if (live.create_packet_jcc_offset != 0) {
-        jcc_target = static_cast<unsigned char*>(target) + live.create_packet_jcc_target_offset;
+    if (live->create_packet_jcc_offset != 0) {
+        jcc_target = static_cast<unsigned char*>(address) + live->create_packet_jcc_target_offset;
     }
-    ok = install_inline_hook_short(g_create_packet_hook, target, live.create_packet.bytes,
-                                   live.create_packet_hook_length,
+    ok = install_inline_hook_short(g_create_packet_hook, address, target.patch_bytes,
+                                   live->create_packet_hook_length,
                                    reinterpret_cast<void*>(&create_packet_detour),
-                                   live.create_packet_jcc_offset,
-                                   live.create_packet_jcc_offset != 0 ? 2 : 0,
+                                   live->create_packet_jcc_offset,
+                                   live->create_packet_jcc_offset != 0 ? 2 : 0,
                                    jcc_target);
 #endif
     if (!ok) {
         log_write(LogLevel::Error, "failed to install MinecraftPackets::createPacket hook at rva=0x%llx",
-                  static_cast<unsigned long long>(live.create_packet.rva));
+                  static_cast<unsigned long long>(target.address - state().module.base));
         return false;
     }
     g_create_packet_original = reinterpret_cast<CreatePacketFn>(g_create_packet_hook.trampoline);
     g_packet_hook_installed = true;
     log_write(LogLevel::Info, "packet factory hook installed rva=0x%llx length=%u",
-              static_cast<unsigned long long>(live.create_packet.rva), live.create_packet_hook_length);
+              static_cast<unsigned long long>(target.address - state().module.base),
+              live->create_packet_hook_length);
     return true;
 }
 
@@ -815,15 +812,15 @@ bool install_packet_send_hook(void* player) {
     if (player == nullptr) {
         return false;
     }
-    const auto* version = state().profile;
-    if (version == nullptr || version->live.send_network_packet_slot == 0) {
+    const auto* version = state().layout;
+    if (version == nullptr || version->send_network_packet_slot == 0) {
         return false;
     }
     auto** vtable = *reinterpret_cast<void***>(player);
     if (vtable == nullptr) {
         return false;
     }
-    const int slot = static_cast<int>(version->live.send_network_packet_slot / sizeof(void*));
+    const int slot = static_cast<int>(version->send_network_packet_slot / sizeof(void*));
     const char* error = nullptr;
     if (!install_vtable_hook(player, slot, reinterpret_cast<void*>(&send_packet_detour),
                              reinterpret_cast<void**>(&g_send_packet_original), nullptr, 0, &error)) {

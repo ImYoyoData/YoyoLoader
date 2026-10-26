@@ -145,4 +145,18 @@ const VersionProfile* find_profile(const char* build_id) {
     return nullptr;
 }
 
+/*
+ * The two known builds use different ABIs (libc++ vs MSVC), so the fallback
+ * must match the platform, not the version.  Object offsets are driven by the
+ * compiler layout, which is why a new build on the same platform normally
+ * keeps working with the previous layout.
+ */
+const LiveProfile* fallback_layout() {
+#ifdef _WIN32
+    return &kWindows.live;
+#else
+    return &kLinux.live;
+#endif
+}
+
 } // namespace yoyo

@@ -120,36 +120,32 @@ void install_level_tick_hook(void*) {
     if (g_level_hook_installed) {
         return;
     }
-    const auto* version = state().profile;
-    if (version == nullptr || version->live.level_tick.rva == 0 || version->live.level_tick.length < 14) {
+    const auto& target = state().symbols.level_tick;
+    if (!target.valid() || target.patch_length < 14) {
+        if (!g_level_hook_attempted) {
+            g_level_hook_attempted = true;
+            log_write(LogLevel::Warn, "Level::tick target was not resolved; tick events are unavailable");
+        }
         return;
     }
-    void* target = reinterpret_cast<void*>(state().module.base + version->live.level_tick.rva);
-    bool ok = false;
-    if (version->live.level_tick_rip_offset != 0) {
-        ok = install_inline_hook_reloc(g_level_tick_hook, target, version->live.level_tick.bytes,
-                                       version->live.level_tick.length,
-                                       reinterpret_cast<void*>(&level_tick_detour),
-                                       version->live.level_tick_rip_offset,
-                                       version->live.level_tick_rip_instruction_length);
-    } else {
-        ok = install_inline_hook(g_level_tick_hook, target, version->live.level_tick.bytes,
-                                 version->live.level_tick.length,
-                                 reinterpret_cast<void*>(&level_tick_detour));
-    }
+    void* address = reinterpret_cast<void*>(target.address);
+    const bool ok = install_inline_hook_masked(g_level_tick_hook, address, target.patch_bytes,
+                                               target.patch_mask, target.patch_length,
+                                               reinterpret_cast<void*>(&level_tick_detour),
+                                               target.rip_offset, target.rip_instruction_length);
     if (!ok) {
         if (!g_level_hook_attempted) {
             g_level_hook_attempted = true;
             log_write(LogLevel::Warn, "Level::tick inline hook failed at rva=0x%llx",
-                      static_cast<unsigned long long>(version->live.level_tick.rva));
+                      static_cast<unsigned long long>(target.address - state().module.base));
         }
         return;
     }
     g_level_tick_original = g_level_tick_hook.trampoline;
     g_level_hook_installed = true;
     log_write(LogLevel::Info, "Level::tick inline hook installed rva=0x%llx length=%u",
-              static_cast<unsigned long long>(version->live.level_tick.rva),
-              static_cast<unsigned>(version->live.level_tick.length));
+              static_cast<unsigned long long>(target.address - state().module.base),
+              static_cast<unsigned>(target.patch_length));
 }
 
 struct MoveState {
@@ -175,7 +171,7 @@ void level_tick_detour(void* level) {
             pending.swap(pending_joins());
         }
         if (!pending.empty()) {
-            const auto& offset = state().profile->live.join_flag_offset;
+            const auto& offset = state().layout->join_flag_offset;
             std::vector<PendingJoin> keep;
             for (auto& item : pending) {
                 if (players_is_online(item.handle)) {
@@ -357,6 +353,7 @@ bool try_to_load_player_detour(void* self, void* server_player, const void* conn
     remember_player(player);
     players_upsert({player.name, player.xuid, player.address, player.runtime_id, player.handle, false});
     install_packet_send_hook(player.handle);
+    live_validate_layout(player.handle);
 
     bool cancelled = false;
     emit_pre_join(player, cancelled);
@@ -532,22 +529,25 @@ void text_packet_detour(void* self, const void* network_id, const void* packet) 
     }
 }
 
-bool install_one(InlineHook& hook, const char* name, const Prologue& spec, void* detour, void** original) {
-    if (spec.rva == 0 || spec.length == 0) {
-        log_write(LogLevel::Warn, "%s hook is not available for this build", name);
+bool install_one(InlineHook& hook, const char* name, const ResolvedTarget& spec, void* detour,
+                 void** original) {
+    if (!spec.valid() || spec.patch_length == 0) {
+        log_write(LogLevel::Warn, "%s hook target is not available for this build", name);
         return false;
     }
-    void* target = reinterpret_cast<void*>(state().module.base + spec.rva);
-    if (!install_inline_hook(hook, target, spec.bytes, spec.length, detour)) {
+    void* target = reinterpret_cast<void*>(spec.address);
+    if (!install_inline_hook_masked(hook, target, spec.patch_bytes, spec.patch_mask, spec.patch_length,
+                                    detour, spec.rip_offset, spec.rip_instruction_length)) {
         log_write(LogLevel::Error, "failed to install %s hook at rva=0x%llx", name,
-                  static_cast<unsigned long long>(spec.rva));
+                  static_cast<unsigned long long>(spec.address - state().module.base));
         return false;
     }
     if (original != nullptr) {
         *original = hook.trampoline;
     }
-    log_write(LogLevel::Info, "inline hook installed %s rva=0x%llx", name,
-              static_cast<unsigned long long>(spec.rva));
+    log_write(LogLevel::Info, "inline hook installed %s rva=0x%llx%s", name,
+              static_cast<unsigned long long>(spec.address - state().module.base),
+              spec.recovered ? " (signature)" : "");
     return true;
 }
 
@@ -559,26 +559,26 @@ void* disconnect_original_fn() {
 
 bool install_player_hooks() {
     auto& rt = state();
-    if (rt.profile == nullptr) {
-        log_write(LogLevel::Error, "no version profile; refusing to hook");
+    if (!rt.symbols.complete()) {
+        log_write(LogLevel::Error, "hook targets were not resolved; refusing to hook");
         return false;
     }
 
-    bool ok = install_one(g_try_hook, "tryToLoadPlayer", rt.profile->try_to_load_player,
+    bool ok = install_one(g_try_hook, "tryToLoadPlayer", rt.symbols.try_to_load_player,
                           reinterpret_cast<void*>(&try_to_load_player_detour),
                           reinterpret_cast<void**>(&g_try_original));
     if (!ok) {
         return false;
     }
 
-    install_one(g_disconnect_hook, "disconnectClientWithMessage", rt.profile->disconnect_client,
+    install_one(g_disconnect_hook, "disconnectClientWithMessage", rt.symbols.disconnect_client,
                 reinterpret_cast<void*>(&disconnect_detour), reinterpret_cast<void**>(&g_disconnect_original));
-    install_one(g_join_hook, "SetLocalPlayerAsInitialized", rt.profile->set_local_player_initialized,
+    install_one(g_join_hook, "SetLocalPlayerAsInitialized", rt.symbols.set_local_player_initialized,
                 reinterpret_cast<void*>(&set_local_player_initialized_detour),
                 reinterpret_cast<void**>(&g_set_local_init_original));
-    install_one(g_chat_hook, "TextPacket", rt.profile->text_packet,
+    install_one(g_chat_hook, "TextPacket", rt.symbols.text_packet,
                 reinterpret_cast<void*>(&text_packet_detour), reinterpret_cast<void**>(&g_text_packet_original));
-    install_one(g_left_hook, "_onPlayerLeft", rt.profile->live.player_left,
+    install_one(g_left_hook, "_onPlayerLeft", rt.symbols.player_left,
                 reinterpret_cast<void*>(&player_left_detour), reinterpret_cast<void**>(&g_left_original));
     install_level_tick_hook(nullptr);
     return true;

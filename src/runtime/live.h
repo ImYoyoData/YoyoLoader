@@ -81,4 +81,29 @@ bool live_get_network_id(void* player, std::vector<uint8_t>& network_id, uint8_t
 
 bool live_actor_valid(void* actor);
 
+/*
+ * Layout safety.
+ *
+ * Object offsets are compiler/ABI dependent, so a new build on the same
+ * platform usually keeps them, but a build that reorders fields would make
+ * every read and write silently wrong.  Once a real player exists, the bridge
+ * validates the layout against that player: the component pointers must be
+ * readable, positions must be finite, and the dimension vtable must resolve.
+ *
+ * Validation result is cached.  While a fallback layout is unvalidated, reads
+ * are still attempted (they are bounds-checked) but writes are refused.
+ */
+enum class LayoutStatus {
+    Unknown,  /* no player has been observed yet */
+    Verified, /* offsets look correct for this build */
+    Rejected, /* offsets are wrong; live object access is disabled */
+};
+
+void live_validate_layout(void* player);
+LayoutStatus live_layout_status();
+bool live_layout_allows_write();
+
+/* Set when the running build has no exact version profile. */
+void live_set_layout_fallback(bool fallback);
+
 } // namespace yoyo

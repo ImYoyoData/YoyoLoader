@@ -1,13 +1,18 @@
 # YoyoLoader
 
-YoyoLoader 是面向 **Minecraft Bedrock Dedicated Server 1.26.52.3** 的 C++20 注入式 mod loader。
-它不修改原版 `bedrock_server`，而是用一个名为 `yoyo` 的启动器把 `yoyo_runtime` 注入进程，
-再通过逆向得到的 RVA、vtable 槽位和对象布局提供事件与实时 API。
+YoyoLoader 是一个 C++20 注入式 mod loader，为 **Minecraft Bedrock Dedicated Server** 提供
+接近 LegacyScriptEngine 的事件与实时 API。它不修改原版 `bedrock_server`，而是用一个名为
+`yoyo` 的启动器把 `yoyo_runtime` 注入进程。
 
 - 启动器：`yoyo.exe` / `yoyo`
 - 运行时：`yoyo_runtime.dll` / `libyoyo_runtime.so`
 - 命名空间：`yoyo`
 - 插件：C++ / Go（C ABI）、JavaScript（内嵌 QuickJS-ng）
+
+**定位说明。** YoyoLoader 不是官方 Script API 的实现，也不是 LLSE 的替代品。它走的是
+外部注入 + 逆向定位的路线：能力边界比官方插件 API 大（可以接管 packet、做多进程世界、
+发送真实客户端包），代价是版本绑定、需要真实客户端回归。当前已用特征签名把“版本一更新
+就全部失效”降到最低，详见第 4 节。
 
 ## 1. 设计选择
 
@@ -16,7 +21,7 @@ YoyoLoader 是面向 **Minecraft Bedrock Dedicated Server 1.26.52.3** 的 C++20 
 - Windows：挂起方式创建 `bedrock_server.exe`，远程 `LoadLibraryW` 注入，再恢复主线程。
 - Linux：设置 `LD_PRELOAD` 后 `execv` 原版 `bedrock_server`。
 - 原版 `bedrock_server` 保持只读，下载、校验、回滚都简单。
-- 未知 build id 或函数序言不匹配时拒绝 patch，不会盲打。
+- 所有 patch 都以字节特征为门槛；特征不唯一或与预期不符就拒绝 patch，绝不盲打。
 
 启动器优先在当前目录查找 `bedrock_server(.exe)`，找不到再回退到自身所在目录。
 runtime、`plugins/` 和服务器放在同一目录。需要 drop-in 名字时直接复制启动器即可：
@@ -135,6 +140,61 @@ cmake --build build --config Release
 trampoline 会重定位它，并分配在 BDS 映射附近以保证 rel32 可达。Linux 的
 `createPacket` 前 12 字节包含一条短条件跳转，短 hook 会把它改写成近跳转；
 `Packet::handler_` 位于 Packet 基类 `+0x20`。
+
+## 4.1 跨版本支持（特征签名）
+
+上面这张 RVA 表只是“已知版本的高速路径”，不是唯一入口。`src/runtime/signatures.cpp`
+里为每个 hook 目标保存了一条以函数入口为锚点的字节特征：
+
+- 只固定 opcode 和寄存器操作数；栈帧大小、帧指针偏移、参数溢出偏移、相对位移全部通配。
+- 解析顺序：先试 RVA 表，并用同一套掩码校验那里的字节；不匹配就改用特征扫描。
+- 特征必须在可执行段内**唯一命中**，否则判定失败、不 patch。
+- 命中后仍要用掩码再验一次入口字节，防止特征落在函数中间。
+
+因此“版本更新 → 全部功能失效”变成了：
+
+| 情况 | 结果 |
+|---|---|
+| build id 已知 | 走 RVA 表，行为与之前完全一致 |
+| build id 未知，但特征仍唯一 | 全部 hook 自动定位，功能继续可用 |
+| build id 未知，某特征不唯一 | 该 hook 跳过，其它功能不受影响，日志给出原因 |
+| 特征命中但入口字节不符 | 拒绝该 hook |
+
+对象偏移（`Actor` 组件、维度引用等）比函数入口更容易随字段重排而变，所以额外加了一层
+运行时校验：首个真实玩家出现时，用它的组件指针、位置、朝向和维度做合理性检查。
+
+- 校验通过：按正常流程读写。
+- 校验失败：**永久禁用依赖布局的写操作**（传送、设置游戏模式），读取仍然可用。
+- 完全未知的版本：`yoyo.log` 会明确写出 `object layout is a fallback`，不会假装成功。
+
+自测（`_test/sig_selftest.cpp`）做了三件事：
+
+1. 在真实 `bedrock_server.exe` 的 `.text` 里验证 7 条特征各自唯一，且落在记录的 RVA 上；
+2. 以 `DONT_RESOLVE_DLL_REFERENCES` 映射镜像后传入空版本档案，要求 7 个目标全部靠特征解析成功；
+3. 篡改被通配的栈帧立即数，要求特征仍然命中同一位置。
+
+## 4.2 为对齐 LLSE 做的取舍
+
+版本无关性有成本，所以下面这些 LLSE 能力**有意不实现**：
+
+| 未实现 | 原因 |
+|---|---|
+| `mc.runcmd` / `mc.newCommand` | 依赖 `CommandOrigin` / `CommandRegistry` 的内部布局，每个版本都要重新逆向，收益低于维护成本 |
+| 时间 / 天气 / MOTD / 最大玩家数 | 只能伪造客户端显示，无法真正改引擎状态；宁可留空也不假装可用 |
+| `addEffect` / `removeEffect` | 同上：能发包让客户端显示，但服务端状态不变，容易误导 |
+| 模拟玩家 `spawnSimulatedPlayer` | 需要构造完整 `ServerPlayer` 生命周期，极不稳定 |
+| 深层方块事件（红石、活塞、流体、漏斗） | 每个都要独立 hook，且是版本最脆弱的部分 |
+| Scoreboard / BossBar / Map | 需要重建协议对象与状态机，维护成本高 |
+| 完整 PlayerNBT 读写 | 序列化结构随版本变化最大 |
+| 跨维度传送 | 需要 `changeDimension` 全流程，风险高 |
+
+相对的，下面这些**优先保证**，因为它们在多个版本间结构稳定、且是插件最常用的：
+
+- 玩家生命周期事件、聊天、命令前缀
+- 消息 / 标题 / ActionBar / Toast / 表单（含回调）
+- 位置、朝向、维度、生命值、游戏模式、潜行/疾跑/飞行状态
+- 定时器、配置、文件、NBT
+- 多进程多世界
 
 ## 5. 实时 API（YoyoLoader 原生）
 

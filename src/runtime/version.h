@@ -52,4 +52,12 @@ struct VersionProfile {
 
 const VersionProfile* find_profile(const char* build_id);
 
+/*
+ * Layout used when the running build has no exact profile.  Object and packet
+ * offsets are compiler/ABI dependent rather than version dependent, so the
+ * closest known layout usually still reads correctly; writes that would
+ * corrupt state are disabled by the live bridge when the layout is a fallback.
+ */
+const LiveProfile* fallback_layout();
+
 } // namespace yoyo

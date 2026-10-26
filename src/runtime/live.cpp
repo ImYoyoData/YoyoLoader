@@ -35,6 +35,21 @@ constexpr float kPlayerEyeHeight = 1.62f;
 std::atomic<uint32_t> g_form_id{0};
 void* g_server_handler = nullptr;
 
+std::atomic<LayoutStatus> g_layout_status{LayoutStatus::Unknown};
+std::atomic<bool> g_layout_fallback{false};
+
+bool plausible_pointer(const void* pointer) {
+    const auto value = reinterpret_cast<uintptr_t>(pointer);
+    return value > 0x10000 && value < 0x00007FFFFFFFFFFFull;
+}
+
+bool plausible_position(const LiveVec3& position) {
+    constexpr double kLimit = 30000000.0;
+    return std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z) &&
+           std::abs(position.x) <= kLimit && std::abs(position.z) <= kLimit &&
+           std::abs(position.y) <= 4096.0;
+}
+
 struct NetworkIdEntry {
     std::vector<uint8_t> bytes;
     uint8_t sub_client_id = 0;
@@ -56,8 +71,7 @@ std::unordered_map<void*, int>& game_mode_cache() {
 }
 
 const LiveProfile* profile() {
-    const auto* version = state().profile;
-    return version == nullptr ? nullptr : &version->live;
+    return state().layout;
 }
 
 bool write_owned_string(void* address, std::string_view value) {
@@ -564,6 +578,10 @@ bool live_teleport(void* actor, const LiveVec3& position, int dimension) {
     if (live == nullptr || !live_actor_valid(actor) || live->teleport_slot == 0) {
         return false;
     }
+    if (!live_layout_allows_write()) {
+        log_write(LogLevel::Warn, "teleport refused: object layout is not verified for this build");
+        return false;
+    }
     if (dimension != -9999 && dimension != live_get_dimension(actor)) {
         log_write(LogLevel::Warn, "cross-dimension teleport is not ported yet");
         return false;
@@ -689,6 +707,10 @@ bool live_set_game_mode(void* actor, int mode) {
     if (live == nullptr || actor == nullptr || live->set_game_mode_slot == 0) {
         return false;
     }
+    if (!live_layout_allows_write()) {
+        log_write(LogLevel::Warn, "setGameMode refused: object layout is not verified for this build");
+        return false;
+    }
     auto** vtable = *reinterpret_cast<void***>(actor);
     if (vtable == nullptr) {
         return false;
@@ -746,6 +768,71 @@ bool live_get_network_id(void* player, std::vector<uint8_t>& network_id, uint8_t
     network_id = it->second.bytes;
     sub_client_id = it->second.sub_client_id;
     return true;
+}
+
+void live_set_layout_fallback(bool fallback) {
+    g_layout_fallback.store(fallback, std::memory_order_relaxed);
+}
+
+LayoutStatus live_layout_status() {
+    return g_layout_status.load(std::memory_order_relaxed);
+}
+
+bool live_layout_allows_write() {
+    if (!g_layout_fallback.load(std::memory_order_relaxed)) {
+        /* Exact profile: offsets are authoritative for this build. */
+        return true;
+    }
+    return g_layout_status.load(std::memory_order_relaxed) == LayoutStatus::Verified;
+}
+
+/*
+ * Validate the object layout against a real ServerPlayer.
+ *
+ * Every check is a sanity bound rather than an exact value, so a build that
+ * only moved code around still passes while one that reordered Actor fields
+ * fails.  A failure permanently disables layout-dependent writes; reads stay
+ * available because they are bounds-checked at the call site.
+ */
+void live_validate_layout(void* player) {
+    if (player == nullptr || g_layout_status.load(std::memory_order_relaxed) != LayoutStatus::Unknown) {
+        return;
+    }
+    const auto* live = profile();
+    if (live == nullptr) {
+        g_layout_status.store(LayoutStatus::Rejected, std::memory_order_relaxed);
+        return;
+    }
+
+    const auto* bytes = static_cast<unsigned char*>(player);
+    const bool state_ok = plausible_pointer(*reinterpret_cast<void* const*>(bytes + live->state_vector_offset));
+    const bool rotation_ok =
+        plausible_pointer(*reinterpret_cast<void* const*>(bytes + live->rotation_offset));
+
+    LiveVec3 position;
+    const bool position_ok = live_get_position(player, position) && plausible_position(position);
+
+    float pitch = 0.0f;
+    float yaw = 0.0f;
+    const bool rotation_values_ok = live_get_rotation(player, pitch, yaw) && std::isfinite(pitch) &&
+                                    std::isfinite(yaw) && std::abs(pitch) <= 720.0f &&
+                                    std::abs(yaw) <= 100000.0f;
+
+    const int dimension = live_get_dimension(player);
+    const bool dimension_ok = dimension >= 0 && dimension <= 2;
+
+    if (state_ok && rotation_ok && position_ok && rotation_values_ok && dimension_ok) {
+        g_layout_status.store(LayoutStatus::Verified, std::memory_order_relaxed);
+        log_write(LogLevel::Info, "object layout verified against a live player");
+        return;
+    }
+
+    g_layout_status.store(LayoutStatus::Rejected, std::memory_order_relaxed);
+    log_write(LogLevel::Error,
+              "object layout rejected (state=%d rotation=%d position=%d angles=%d dimension=%d); "
+              "live object writes are disabled",
+              state_ok ? 1 : 0, rotation_ok ? 1 : 0, position_ok ? 1 : 0, rotation_values_ok ? 1 : 0,
+              dimension_ok ? 1 : 0);
 }
 
 } // namespace yoyo
