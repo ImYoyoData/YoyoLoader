@@ -183,24 +183,41 @@ std::string uuid_hex(const void* data) {
     return result;
 }
 
-std::string read_form_response(const void* payload) {
-    /* ModalFormResponsePacket payload: uint32 form_id, optional<string>
-     * response, optional<uint8> cancel_reason.  MSVC optional stores the
-     * engaged flag first; libc++ stores the value first and the flag after
-     * the value. */
-    if (native_abi() == NativeAbi::Msvc) {
-        const auto* optional = static_cast<const unsigned char*>(payload) + 8;
-        if (optional[0] == 0) {
-            return {};
-        }
-        return read_string_at(optional, 8);
+struct FormResponse {
+    std::string text;
+    int cancel_reason = -1;
+    bool has_text = false;
+};
+
+FormResponse read_form_response(const void* payload) {
+    /*
+     * ModalFormResponsePacket payload:
+     *   +0  uint32 form_id
+     *   +8  optional<string> response
+     *   +8+sizeof(optional<string>) optional<uint8> cancel_reason
+     *
+     * Both MSVC and libc++ store the value before the engaged flag for
+     * optional<T>, so the string starts at the object's base and the flag
+     * sits just past the string.  optional<uint8> likewise has the value at
+     * +0 and its flag at +1.
+     */
+    FormResponse out;
+    const auto* base = static_cast<const unsigned char*>(payload);
+    const size_t string_size = native_string_size(native_abi());
+    const size_t optional_string_size = string_size + 8; /* value + flag + padding */
+
+    const auto* response = base + 8;
+    const bool response_engaged = response[string_size] != 0;
+    if (response_engaged) {
+        out.text = read_string_at(response, 0);
+        out.has_text = true;
     }
-    const auto* optional = static_cast<const unsigned char*>(payload) + 8;
-    std::string value = read_string_at(optional, 0);
-    if (!value.empty() || optional[24] != 0) {
-        return value;
+
+    const auto* reason = base + 8 + optional_string_size;
+    if (reason[1] != 0) {
+        out.cancel_reason = reason[0];
     }
-    return {};
+    return out;
 }
 
 PlayerView make_player_view(void* handle) {
@@ -483,12 +500,17 @@ void handle_player_equipment(void* packet, PlayerView& player) {
 void handle_form_response(void* packet, PlayerView& player, bool& cancelled) {
     const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
     const int32_t form_id = read_value<int32_t>(payload, 0);
+    const FormResponse response = read_form_response(payload);
     DetailEvent detail;
     detail.packet_id = kPacketModalFormResponse;
     detail.value = form_id;
-    detail.text = read_form_response(payload);
+    detail.text = response.text;
     if (emit_detail(YOYO_EVENT_FORM_RESPONSE, player, detail)) {
         cancelled = true;
+    }
+    if (player.handle != nullptr && form_id > 0) {
+        js::dispatch_form_response(static_cast<uint32_t>(form_id), player, response.text,
+                                   response.cancel_reason);
     }
 }
 

@@ -27,4 +27,12 @@ void dispatch_player_move(const PlayerView& player, const LiveVec3& from, const 
 void dispatch_player_dimension_change(const PlayerView& player, int from_dimension, int to_dimension);
 void dispatch_detail(int type, const PlayerView& player, const DetailEvent& detail, bool& cancelled);
 
+/* Pending form callbacks, keyed by the id sent in ModalFormRequest. */
+void dispatch_form_response(uint32_t form_id, const PlayerView& player, const std::string& response,
+                            int cancel_reason);
+
+/* Chat commands registered from JS (mc.regPlayerCmd). */
+bool has_player_command(const std::string& message);
+bool run_player_command(const PlayerView& player, const std::string& message, std::string& output);
+
 } // namespace yoyo::js

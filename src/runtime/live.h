@@ -44,8 +44,9 @@ bool live_send_actionbar(void* player, std::string_view text);
 bool live_reset_title(void* player);
 bool live_send_toast(void* player, std::string_view title, std::string_view content);
 
-/* Player::sendForm(ModalFormRequestPacket). */
-bool live_send_form(void* player, std::string_view form_json);
+/* Player::sendForm(ModalFormRequestPacket).  `form_id`, when not null,
+ * receives the id assigned to the packet so a response can be matched. */
+bool live_send_form(void* player, std::string_view form_json, uint32_t* form_id = nullptr);
 bool live_transfer(void* player, std::string_view host, int port);
 
 /* Actor geometry.  getPosition returns the eye position BDS stores in

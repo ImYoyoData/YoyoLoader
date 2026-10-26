@@ -82,7 +82,20 @@
 | `setTitle` / `setContent` / `setConfirm` / `setCancel` | ✅ |
 | `toJSON` / `toString` | ✅ |
 | `form.sendTo(player)` / `player.sendForm` | ✅ 真实 ModalFormRequest 包下发 |
-| 表单响应回调（客户端提交 → JS callback） | 🟡 全局 `onFormResponse`；Form 对象级回调未接入 |
+| Form 对象级响应回调 `sendTo(player, cb)` / `sendForm(form, cb)` | ✅ 按 form id 回填，已自测 |
+| `player.sendModalForm(title, content, ok, cancel, cb)` | 🟡 已实现，未做真实客户端验证 |
+| 全局 `onFormResponse` | ✅ |
+
+## 定时器 / 脚本辅助 / 配置 / 文件
+
+| API | 状态 |
+|---|---|
+| `setTimeout` / `setInterval` / `clearInterval` / `clearTimeout`（函数或代码字符串） | ✅ 由 `Level::tick` 驱动，已自测 |
+| `log` / `colorLog` / `fastLog` | ✅ |
+| `mc.regPlayerCmd` / `mc.regConsoleCmd` | 🟡 聊天命令层；玩家命令已接入 `onChat`，控制台命令需控制台输入 hook |
+| `new JsonConfigFile` / `new IniConfigFile`（含 `mc.newConfig`） | ✅ 路径限制在服务器目录内，已自测 |
+| `new File` + 同步/异步方法 | ✅ 同步实现；异步方法同步回调，已自测 |
+| `mc.getBDSVersion` / `mc.getDimensionId` / `mc.getDimensionName` / `mc.getOnlinePlayerNum` | ✅ |
 
 ## 物品 / 方块 / 容器 / 实体
 
@@ -99,12 +112,13 @@
 |---|---|
 | `mc.log` | ✅ |
 | `mc.getServerVersion` | ✅（build id） |
-| `mc.getModuleBase` | ✅ |
-| `mc.broadcast` | ✅ 真实 TextPacket，发送给在线玩家 |
+| `mc.getModuleBase` | ✅ || `mc.broadcast` | ✅ 真实 TextPacket，发送给在线玩家 |
 | `mc.getLevel` | 🟡 轻量对象，仅玩家列表/数量 |
 | `mc.worlds.list/current/isController/load/unload/switch/isOp` | ✅ Windows / Linux 多进程世界；Linux 使用 fork+exec+yoyo |
 | `player.transfer(host, port)` | ✅ 真实 TransferPacket |
 | `mc.runcmd` / `mc.runcmdEx` | ❌ 需要 CommandOrigin / MinecraftCommands |
+| `mc.newCommand` 原生命令注册 | ❌ 需要 CommandRegistry |
+| 时间 / 天气 / 最大玩家数 / MOTD | ❌ 需要 Level / WeatherManager / ServerConfig 的可写入口 |
 | Scoreboard / BossBar / Map / Boss Event | ❌ |
 | 世界时间 / 天气 | ❌ |
 
@@ -146,3 +160,5 @@
   尚未在本轮启动服务器做运行验证。
 - Windows 的 12 字节短 hook 和 Linux 的 12 字节短 hook 都做了独立分支跳转自测
   （`low=42 high=7`）。
+- JS 定时器、JSON/INI 配置、File 读写、表单回调表已在
+  `_test/js_selftest.cpp` 中脱离 BDS 真实运行通过（9 项断言全部 PASS）。

@@ -160,7 +160,110 @@ mc.getLevel();                       // lightweight level view
 mc.log("message");
 mc.getServerVersion();               // build id
 mc.getModuleBase();
+mc.getBDSVersion();                  // "1.26.52.3"
+mc.getDimensionId("nether");         // 1, or null
+mc.getDimensionName(2);              // "the_end", or null
+mc.getOnlinePlayerNum();
 ```
+
+## Timers and script helpers
+
+```js
+log("plain console line");            // same as mc.log
+colorLog("§a", "colored line");
+fastLog("asynchronous-style log");    // same sink, safe from any listener
+
+const t1 = setTimeout(() => player.sendMessage("hi"), 1000);
+const t2 = setInterval(() => mc.broadcast("tick"), 5000);
+clearInterval(t1);                    // cancels both one-shot and repeating ids
+clearTimeout(t2);                     // alias
+```
+
+Timers are drained from `Level::tick` on the game thread, so a timer callback
+may send packets or touch world state. Delays are milliseconds; resolution is
+one server tick (50 ms by default).
+
+## Chat commands
+
+```js
+mc.regPlayerCmd("spawn", "Teleport to spawn", (player, args, output) => {
+    player.teleport({ x: 0, y: 64, z: 0 });
+    output.success("§aWelcome back");
+    return "§bTeleported";       // returned string is sent to the player
+}, 0);                           // 0 = everyone, 1 = OPs in yoyo_ops.txt
+```
+
+A matching chat line (with or without a leading `/` or `!`) is removed from
+chat and routed to the callback. `args` is everything after the command name.
+This is a YoyoLoader chat-command layer, not a vanilla command registration:
+tab completion and `/help` integration are not provided.
+
+## Config files
+
+```js
+const cfg = new JsonConfigFile("plugins/config.json", '{"enabled":true}');
+cfg.set("greeting", "hello");
+cfg.get("greeting", "default");
+cfg.init("version", 1);       // returns the stored value or writes the default
+cfg.delete("greeting");
+cfg.getPath();
+cfg.read();                   // whole file as text
+cfg.write("{}");
+cfg.reload();
+
+const ini = new IniConfigFile("plugins/config.ini");
+ini.set("main", "port", "19132");
+ini.getStr("main", "port", "0");
+ini.getInt("main", "port", 0);
+ini.getFloat("main", "ratio", 0);
+ini.getBool("main", "debug", false);
+ini.delete("main", "port");
+```
+
+Paths are resolved inside the server directory. Absolute paths and `..`
+escapes are rejected, so a plugin cannot touch arbitrary host files.
+
+## File objects
+
+```js
+const file = new File("plugins/data/log.txt", "a");
+file.writeLineSync("line");
+file.close();
+
+const reader = new File("plugins/data/log.txt", "r");
+reader.readLineSync();        // "line", or null at the end
+reader.readSync(16);          // at most 16 bytes as text
+reader.readAllSync();
+reader.seekTo(0, false);
+reader.isEOF();
+reader.flush();
+reader.close();
+
+const writer = new File("plugins/data/raw.bin", "w", true);  // binary mode
+```
+
+`read`, `readLine`, `readAll`, `write` and `writeLine` accept a callback and
+run it synchronously with the same result, so LLSE-style async code works
+without a worker thread.
+
+## Form callbacks
+
+```js
+const form = mc.newSimpleForm("Title", "Content");
+form.addButton("OK");
+form.addButton("Cancel");
+
+player.sendForm(form, (player, id, reason) => {
+    // id is the clicked button index, or null when the player closed the form
+    // reason: 0 = user closed, 1 = user busy
+});
+
+player.sendModalForm("Confirm", "Continue?", "Yes", "No",
+    (player, result, reason) => { /* result is true/false or null */ });
+```
+
+`form.sendTo(player, callback)` is equivalent. `onFormResponse` still fires
+globally for every form response.
 
 ## NBT
 

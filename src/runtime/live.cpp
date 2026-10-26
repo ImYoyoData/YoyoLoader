@@ -426,17 +426,20 @@ bool live_send_toast(void* player, std::string_view title, std::string_view cont
     return send_network_packet(player, packet.get());
 }
 
-bool live_send_form(void* player, std::string_view form_json) {
+bool live_send_form(void* player, std::string_view form_json, uint32_t* form_id) {
     NativePacket packet(kPacketShowModalForm);
     if (!packet) {
         log_write(LogLevel::Warn, "ModalFormRequestPacket allocation failed");
         return false;
     }
     auto* payload = static_cast<unsigned char*>(packet.get()) + kPacketBaseSize;
-    const uint32_t form_id = ++g_form_id;
-    std::memcpy(payload, &form_id, sizeof(form_id));
+    const uint32_t assigned = ++g_form_id;
+    std::memcpy(payload, &assigned, sizeof(assigned));
     if (!write_owned_string(payload + 8, form_json)) {
         return false;
+    }
+    if (form_id != nullptr) {
+        *form_id = assigned;
     }
     return send_network_packet(player, packet.get());
 }

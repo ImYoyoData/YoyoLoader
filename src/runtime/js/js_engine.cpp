@@ -236,6 +236,38 @@ JSValue player_send_toast(JSContext* ctx, JSValueConst this_val, int argc, JSVal
     return JS_NewBool(ctx, live_send_toast(handle, title, content));
 }
 
+JSValue player_send_modal_form(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 4) {
+        return JS_ThrowTypeError(ctx, "sendModalForm(title, content, confirm, cancel[, callback]) requires 4 arguments");
+    }
+    JSValue schema = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, schema, "type", JS_NewString(ctx, "modal"));
+    JS_SetPropertyStr(ctx, schema, "title", JS_DupValue(ctx, argv[0]));
+    JS_SetPropertyStr(ctx, schema, "content", JS_DupValue(ctx, argv[1]));
+    JS_SetPropertyStr(ctx, schema, "button1", JS_DupValue(ctx, argv[2]));
+    JS_SetPropertyStr(ctx, schema, "button2", JS_DupValue(ctx, argv[3]));
+    JSValue json = JS_JSONStringify(ctx, schema, JS_UNDEFINED, JS_UNDEFINED);
+    JS_FreeValue(ctx, schema);
+    if (JS_IsException(json)) {
+        log_exception(ctx);
+        return JS_EXCEPTION;
+    }
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) {
+        JS_FreeValue(ctx, json);
+        return throw_no_live_player(ctx);
+    }
+    std::string text = to_std_string(ctx, json);
+    JS_FreeValue(ctx, json);
+
+    uint32_t form_id = 0;
+    const bool sent = live_send_form(handle, text, &form_id);
+    if (sent && argc > 4 && JS_IsFunction(ctx, argv[4])) {
+        remember_form_callback(form_id, argv[4]);
+    }
+    return JS_NewBool(ctx, sent);
+}
+
 JSValue make_location(JSContext* ctx, const LiveVec3& position, int dimension, bool include_rotation, float pitch,
                       float yaw) {
     JSValue object = JS_NewObject(ctx);
@@ -571,6 +603,33 @@ JSValue mc_get_module_base(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return JS_NewInt64(ctx, static_cast<int64_t>(state().module.base));
 }
 
+JSValue mc_get_dimension_id(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_NULL;
+    const std::string name = to_std_string(ctx, argv[0]);
+    if (name == "overworld" || name == "minecraft:overworld" || name == "0") return JS_NewInt32(ctx, 0);
+    if (name == "nether" || name == "minecraft:nether" || name == "1") return JS_NewInt32(ctx, 1);
+    if (name == "the_end" || name == "theend" || name == "minecraft:the_end" || name == "2") {
+        return JS_NewInt32(ctx, 2);
+    }
+    return JS_NULL;
+}
+
+JSValue mc_get_dimension_name(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_NULL;
+    int32_t dimension = 0;
+    if (JS_ToInt32(ctx, &dimension, argv[0]) < 0) return JS_EXCEPTION;
+    if (dimension < 0 || dimension > 2) return JS_NULL;
+    return JS_NewString(ctx, live_dimension_name(dimension));
+}
+
+JSValue mc_get_bds_version(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewString(ctx, "1.26.52.3");
+}
+
+JSValue mc_get_online_player_num(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewInt32(ctx, static_cast<int32_t>(players_online().size()));
+}
+
 JSValue mc_unsupported(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return unsupported(ctx, "this mc function is not implemented for the current BDS build");
 }
@@ -660,8 +719,16 @@ void register_mc(JSContext* ctx) {
                       JS_NewCFunction(ctx, mc_get_online_count, "getOnlinePlayerCount", 0));
     JS_SetPropertyStr(ctx, mc, "getServerVersion",
                       JS_NewCFunction(ctx, mc_get_server_version, "getServerVersion", 0));
+    JS_SetPropertyStr(ctx, mc, "getBDSVersion",
+                      JS_NewCFunction(ctx, mc_get_bds_version, "getBDSVersion", 0));
     JS_SetPropertyStr(ctx, mc, "getModuleBase",
                       JS_NewCFunction(ctx, mc_get_module_base, "getModuleBase", 0));
+    JS_SetPropertyStr(ctx, mc, "getDimensionId",
+                      JS_NewCFunction(ctx, mc_get_dimension_id, "getDimensionId", 1));
+    JS_SetPropertyStr(ctx, mc, "getDimensionName",
+                      JS_NewCFunction(ctx, mc_get_dimension_name, "getDimensionName", 1));
+    JS_SetPropertyStr(ctx, mc, "getOnlinePlayerNum",
+                      JS_NewCFunction(ctx, mc_get_online_player_num, "getOnlinePlayerNum", 1));
     JS_SetPropertyStr(ctx, mc, "broadcast", JS_NewCFunction(ctx, mc_broadcast, "broadcast", 1));
     JS_SetPropertyStr(ctx, mc, "getLevel", JS_NewCFunction(ctx, mc_get_level, "getLevel", 0));
 
@@ -758,16 +825,22 @@ JSValue unsupported(JSContext* ctx, const char* message) {
 
 JSValue player_send_form(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 1 || !JS_IsObject(argv[0])) {
-        return JS_ThrowTypeError(ctx, "sendForm(form) requires a form object");
+        return JS_ThrowTypeError(ctx, "sendForm(form[, callback]) requires a form object");
     }
     JSValue function = JS_GetPropertyStr(ctx, argv[0], "sendTo");
     if (!JS_IsFunction(ctx, function)) {
         JS_FreeValue(ctx, function);
         return JS_ThrowTypeError(ctx, "form.sendTo(player) is not available");
     }
-    JSValue args[1] = {JS_DupValue(ctx, this_val)};
-    JSValue result = JS_Call(ctx, function, argv[0], 1, args);
+    JSValue args[2] = {JS_DupValue(ctx, this_val), JS_UNDEFINED};
+    int arg_count = 1;
+    if (argc > 1 && JS_IsFunction(ctx, argv[1])) {
+        args[1] = JS_DupValue(ctx, argv[1]);
+        arg_count = 2;
+    }
+    JSValue result = JS_Call(ctx, function, argv[0], arg_count, args);
     JS_FreeValue(ctx, args[0]);
+    JS_FreeValue(ctx, args[1]);
     JS_FreeValue(ctx, function);
     if (JS_IsException(result)) {
         log_exception(ctx);
@@ -805,8 +878,10 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
                       JS_NewCFunction(ctx, player_send_actionbar, "send_actionbar", 1));
     JS_SetPropertyStr(ctx, object, "resetTitle", JS_NewCFunction(ctx, player_reset_title, "resetTitle", 0));
     JS_SetPropertyStr(ctx, object, "reset_title", JS_NewCFunction(ctx, player_reset_title, "reset_title", 0));
-    JS_SetPropertyStr(ctx, object, "sendForm", JS_NewCFunction(ctx, player_send_form, "sendForm", 1));
-    JS_SetPropertyStr(ctx, object, "send_form", JS_NewCFunction(ctx, player_send_form, "send_form", 1));
+    JS_SetPropertyStr(ctx, object, "sendForm", JS_NewCFunction(ctx, player_send_form, "sendForm", 2));
+    JS_SetPropertyStr(ctx, object, "send_form", JS_NewCFunction(ctx, player_send_form, "send_form", 2));
+    JS_SetPropertyStr(ctx, object, "sendModalForm",
+                      JS_NewCFunction(ctx, player_send_modal_form, "sendModalForm", 5));
     JS_SetPropertyStr(ctx, object, "kick", JS_NewCFunction(ctx, player_kick, "kick", 1));
     JS_SetPropertyStr(ctx, object, "transfer", JS_NewCFunction(ctx, player_transfer, "transfer", 2));
     JS_SetPropertyStr(ctx, object, "getPosition", JS_NewCFunction(ctx, player_get_position, "getPosition", 0));
@@ -885,6 +960,10 @@ bool start() {
     register_nbt(g_context);
     log_write(LogLevel::Info, "JS registering forms");
     register_forms(g_context);
+    log_write(LogLevel::Info, "JS registering timers and helpers");
+    register_timers(g_context);
+    register_script_helpers(g_context);
+    register_commands(g_context);
     log_write(LogLevel::Info, "JS loading plugins");
     load_js_plugins(g_context);
     log_write(LogLevel::Info, "QuickJS ready");
@@ -894,6 +973,10 @@ bool start() {
 void stop() {
     std::lock_guard lock(g_mutex);
     if (g_context != nullptr) {
+        clear_timers();
+        clear_form_callbacks();
+        clear_commands();
+        close_files();
         for (auto& [name, listeners] : g_listeners) {
             for (JSValue fn : listeners) JS_FreeValue(g_context, fn);
         }
@@ -989,14 +1072,18 @@ void dispatch_server_ready(std::string_view version, uintptr_t module_base) {
 void dispatch_tick(uint64_t tick) {
     std::lock_guard lock(g_mutex);
     if (g_context == nullptr) return;
-    auto it = g_listeners.find("onTick");
-    if (it == g_listeners.end() || it->second.empty()) return;
     JS_UpdateStackTop(g_runtime);
-    JSValue event = JS_NewObject(g_context);
-    JS_SetPropertyStr(g_context, event, "tick", JS_NewInt64(g_context, static_cast<int64_t>(tick)));
-    JSValue args[1] = {event};
-    call_listeners_locked("onTick", 1, args);
-    JS_FreeValue(g_context, event);
+    auto it = g_listeners.find("onTick");
+    if (it != g_listeners.end() && !it->second.empty()) {
+        JSValue event = JS_NewObject(g_context);
+        JS_SetPropertyStr(g_context, event, "tick", JS_NewInt64(g_context, static_cast<int64_t>(tick)));
+        JSValue args[1] = {event};
+        call_listeners_locked("onTick", 1, args);
+        JS_FreeValue(g_context, event);
+    }
+    /* Timers are drained after onTick on the game thread, so timer callbacks
+     * may send packets or touch world state. */
+    run_timers();
 }
 
 void dispatch_player_move(const PlayerView& player, const LiveVec3& from, const LiveVec3& to,

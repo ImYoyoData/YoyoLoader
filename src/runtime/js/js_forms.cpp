@@ -1,10 +1,13 @@
 #include "js_internal.h"
 
+#include "../events.h"
 #include "../live.h"
 #include "../log.h"
 
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace yoyo::js {
 namespace {
@@ -134,7 +137,13 @@ JSValue form_send_to(JSContext* ctx, JSValueConst this_val, int argc, JSValueCon
     }
     std::string text = text_of(ctx, json);
     JS_FreeValue(ctx, json);
-    return JS_NewBool(ctx, live_send_form(handle, text));
+
+    uint32_t form_id = 0;
+    const bool sent = live_send_form(handle, text, &form_id);
+    if (sent && argc > 1 && JS_IsFunction(ctx, argv[1])) {
+        remember_form_callback(form_id, argv[1]);
+    }
+    return JS_NewBool(ctx, sent);
 }
 
 JSValue form_set_title(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -520,6 +529,106 @@ void set_mc(JSContext* ctx, const char* name, JSValue function) {
 }
 
 } // namespace
+
+namespace {
+
+std::mutex& form_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<uint32_t, JSValue>& form_callbacks() {
+    static std::unordered_map<uint32_t, JSValue> callbacks;
+    return callbacks;
+}
+
+/* ModalFormResponse carries either a JSON array/object (simple and custom
+ * forms) or "true"/"false" for modal forms. */
+JSValue decode_form_response(JSContext* ctx, const std::string& response) {
+    if (response.empty()) {
+        return JS_NULL;
+    }
+    if (response == "true") {
+        return JS_TRUE;
+    }
+    if (response == "false") {
+        return JS_FALSE;
+    }
+    JSValue value = JS_ParseJSON(ctx, response.data(), response.size(), "<form-response>");
+    if (JS_IsException(value)) {
+        JS_FreeValue(ctx, value);
+        return JS_NewStringLen(ctx, response.data(), response.size());
+    }
+    return value;
+}
+
+} // namespace
+
+void remember_form_callback(uint32_t form_id, JSValue callback) {
+    if (g_context == nullptr) {
+        return;
+    }
+    std::lock_guard lock(form_mutex());
+    auto& callbacks = form_callbacks();
+    auto it = callbacks.find(form_id);
+    if (it != callbacks.end()) {
+        JS_FreeValue(g_context, it->second);
+        it->second = JS_DupValue(g_context, callback);
+        return;
+    }
+    callbacks[form_id] = JS_DupValue(g_context, callback);
+    /* Keep the table bounded if a client never answers a form. */
+    if (callbacks.size() > 256) {
+        callbacks.erase(callbacks.begin());
+    }
+}
+
+void dispatch_form_response(uint32_t form_id, const PlayerView& player, const std::string& response,
+                            int cancel_reason) {
+    if (g_context == nullptr) {
+        return;
+    }
+    JSValue callback = JS_UNDEFINED;
+    {
+        std::lock_guard lock(form_mutex());
+        auto& callbacks = form_callbacks();
+        auto it = callbacks.find(form_id);
+        if (it == callbacks.end()) {
+            return;
+        }
+        callback = it->second;
+        callbacks.erase(it);
+    }
+
+    JSValue js_player = make_player(g_context, player);
+    JSValue result;
+    if (cancel_reason >= 0 && response.empty()) {
+        result = JS_NULL;
+    } else {
+        result = decode_form_response(g_context, response);
+    }
+    JSValue reason = JS_NewInt32(g_context, cancel_reason);
+    JSValue args[3] = {js_player, result, reason};
+    JSValue call_result = JS_Call(g_context, callback, JS_UNDEFINED, 3, args);
+    if (JS_IsException(call_result)) {
+        log_exception(g_context);
+    }
+    JS_FreeValue(g_context, call_result);
+    JS_FreeValue(g_context, js_player);
+    JS_FreeValue(g_context, result);
+    JS_FreeValue(g_context, reason);
+    JS_FreeValue(g_context, callback);
+}
+
+void clear_form_callbacks() {
+    std::lock_guard lock(form_mutex());
+    if (g_context != nullptr) {
+        for (auto& [id, callback] : form_callbacks()) {
+            JS_FreeValue(g_context, callback);
+        }
+    }
+    form_callbacks().clear();
+}
 
 void register_forms(JSContext* ctx) {
     set_mc(ctx, "newSimpleForm", JS_NewCFunction(ctx, new_simple_form, "newSimpleForm", 2));
