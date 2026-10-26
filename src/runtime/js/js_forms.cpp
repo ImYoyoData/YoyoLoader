@@ -686,6 +686,17 @@ void clear_form_callbacks() {
     form_callbacks().clear();
 }
 
+
+JSValue make_item_object(JSContext* ctx, std::string_view type, int count, int aux) {
+    JSValue argv[3] = {JS_NewStringLen(ctx, type.data(), type.size()), JS_NewInt32(ctx, count),
+                       JS_NewInt32(ctx, aux)};
+    JSValue item = new_item(ctx, JS_UNDEFINED, 3, argv);
+    for (auto& value : argv) {
+        JS_FreeValue(ctx, value);
+    }
+    return item;
+}
+
 void register_forms(JSContext* ctx) {
     set_mc(ctx, "newSimpleForm", JS_NewCFunction(ctx, new_simple_form, "newSimpleForm", 2));
     set_mc(ctx, "newCustomForm", JS_NewCFunction(ctx, new_custom_form, "newCustomForm", 1));

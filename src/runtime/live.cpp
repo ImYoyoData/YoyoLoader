@@ -29,6 +29,7 @@ constexpr int kPacketTransfer = 85;
 constexpr int kPacketLevelEvent = 25;
 constexpr int kPacketSetTime = 10;
 constexpr int kPacketSpawnParticleEffect = 118;
+constexpr int kPacketUpdateBlock = 21;
 
 constexpr uint32_t kRuntimeIdHash = 0xFC0DBBB5u;
 constexpr uint32_t kUniqueIdHash = 0x18F957AFu;
@@ -212,6 +213,7 @@ public:
         using CreatePacketFn = std::shared_ptr<void> (*)(int);
         auto create = reinterpret_cast<CreatePacketFn>(target);
         owner_ = create(id);
+        packet_remember_vtable(owner_.get(), id);
 #else
         using CreatePacketFn = void* (*)(void*, int);
         alignas(16) unsigned char storage[16] = {};
@@ -219,6 +221,7 @@ public:
         create(storage, id);
         ptr_ = *reinterpret_cast<void**>(storage);
         control_ = *reinterpret_cast<void**>(storage + 8);
+        packet_remember_vtable(ptr_, id);
 #endif
     }
 
@@ -263,7 +266,14 @@ bool send_network_packet(void* player, void* packet) {
     }
     const size_t slot = live->send_network_packet_slot / sizeof(void*);
     void* target = vtable[slot];
+    /*
+     * When the observer hook is installed, calling through the vtable would
+     * re-enter our own detour.  Call the original directly, but first let the
+     * observer see the packet so world state (time, weather, blocks) stays
+     * accurate for packets we generate ourselves.
+     */
     if (target == packet_send_hook_address()) {
+        packet_observe_outgoing(player, packet);
         target = packet_send_original_address();
     }
     const uintptr_t base = state().module.base;
@@ -499,6 +509,10 @@ bool live_set_time(void* player, int ticks) {
     }
     auto* payload = static_cast<unsigned char*>(packet.get()) + kPacketBaseSize;
     std::memcpy(payload, &ticks, sizeof(ticks));
+    if (std::getenv("YOYO_DEBUG_SEND") != nullptr) {
+        extern int yoyo_debug_packet_id(void*);
+        log_write(LogLevel::Info, "live_set_time: built packet, resolved id=%d", yoyo_debug_packet_id(packet.get()));
+    }
     return send_network_packet(player, packet.get());
 }
 
@@ -529,6 +543,29 @@ bool live_set_weather(void* player, int weather) {
     default:
         return false;
     }
+}
+
+/*
+ * UpdateBlockPacket payload: BlockPos, uint32 runtime id, uint32 flags,
+ * uint32 layer.  This only tells one client that a block changed; it does not
+ * write engine state, so it cannot corrupt the world.
+ */
+bool live_set_block(void* player, int x, int y, int z, uint32_t runtime_id, int flags) {
+    NativePacket packet(kPacketUpdateBlock);
+    if (!packet) {
+        log_write(LogLevel::Warn, "UpdateBlockPacket allocation failed");
+        return false;
+    }
+    auto* payload = static_cast<unsigned char*>(packet.get()) + kPacketBaseSize;
+    std::memcpy(payload, &x, sizeof(x));
+    std::memcpy(payload + 4, &y, sizeof(y));
+    std::memcpy(payload + 8, &z, sizeof(z));
+    std::memcpy(payload + 12, &runtime_id, sizeof(runtime_id));
+    const uint32_t block_flags = static_cast<uint32_t>(flags);
+    std::memcpy(payload + 16, &block_flags, sizeof(block_flags));
+    const uint32_t layer = 0;
+    std::memcpy(payload + 20, &layer, sizeof(layer));
+    return send_network_packet(player, packet.get());
 }
 
 bool live_transfer(void* player, std::string_view host, int port) {

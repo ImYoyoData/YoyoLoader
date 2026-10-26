@@ -35,6 +35,7 @@ void register_llse_objects(JSContext* ctx);
  * name, type, isAir) where YoyoLoader used to pass a bare position.
  */
 JSValue make_block_object(JSContext* ctx, int x, int y, int z, int dimid);
+JSValue make_item_object(JSContext* ctx, std::string_view type, int count, int aux);
 
 void register_nbt(JSContext* ctx);
 void register_forms(JSContext* ctx);

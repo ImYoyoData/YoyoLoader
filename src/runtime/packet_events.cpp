@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <iterator>
@@ -28,6 +29,9 @@ constexpr int kPacketPlayerEquipment = 31;
 constexpr int kPacketInteract = 33;
 constexpr int kPacketPlayerAction = 36;
 constexpr int kPacketSetHealth = 42;
+constexpr int kPacketSetTime = 10;
+constexpr int kPacketLevelEvent = 25;
+constexpr int kPacketUpdateBlock = 21;
 constexpr int kPacketRespawn = 45;
 constexpr int kPacketDeathInfo = 189;
 constexpr int kPacketContainerOpen = 46;
@@ -64,6 +68,36 @@ enum PlayerActionType : int {
     ActionStartGliding = 15,
     ActionStopGliding = 16,
 };
+
+/* One block as reported by the server in an UpdateBlockPacket. */
+struct BlockEntry {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+    uint32_t runtime_id = 0;
+    int flags = 0;
+};
+
+/* World state observed from outgoing packets; read-only, no engine access. */
+struct WorldState {
+    int time = -1;
+    int weather = -1; /* 0 clear, 1 rain, 2 thunder */
+    bool time_valid = false;
+    bool weather_valid = false;
+    /* Blocks the server has told this client about.  Bounded so a long session
+     * cannot grow without limit. */
+    std::unordered_map<uint64_t, BlockEntry> blocks;
+};
+
+std::mutex& world_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+WorldState& world_state() {
+    static WorldState state;
+    return state;
+}
 
 struct PlayerState {
     bool initialized = false;
@@ -686,10 +720,65 @@ void handle_outgoing_health(PlayerView& player, void* packet) {
 
 void send_packet_detour(void* player_handle, void* packet) {
     const int packet_id = packet_id_for(packet);
+    if (std::getenv("YOYO_DEBUG_SEND") != nullptr) {
+        log_write(LogLevel::Info, "send hook: player=%p packet=%p id=%d", player_handle, packet, packet_id);
+    }
     bool cancelled = false;
     if (player_handle != nullptr && packet_id >= 0) {
         PlayerView player = make_player_view(player_handle);
-        if (packet_id == kPacketSetHealth) {
+        if (packet_id == kPacketSetTime) {
+            const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+            const int ticks = read_value<int32_t>(payload, 0);
+            std::lock_guard lock(world_mutex());
+            world_state().time = ticks;
+            world_state().time_valid = true;
+        } else if (packet_id == kPacketLevelEvent) {
+            /* LevelEventPacket: int16 event id then floats; 3001/3002 rain,
+             * 3003 thunder. */
+            const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+            const int16_t event_id = read_value<int16_t>(payload, 0);
+            std::lock_guard lock(world_mutex());
+            if (event_id == 3001) {
+                world_state().weather = 1;
+                world_state().weather_valid = true;
+            } else if (event_id == 3002) {
+                world_state().weather = 0;
+                world_state().weather_valid = true;
+            } else if (event_id == 3003) {
+                world_state().weather = 2;
+                world_state().weather_valid = true;
+            } else if (event_id == 1003) {
+                world_state().weather = world_state().weather == 1 ? 1 : 0;
+                world_state().weather_valid = true;
+            }
+        } else if (packet_id == kPacketUpdateBlock) {
+            /*
+             * UpdateBlockPacket payload:
+             *   +0  BlockPos position (int32 x, y, z)
+             *   +12 uint32 block runtime id
+             *   +16 uint32 flags
+             *   +20 uint32 layer
+             */
+            const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+            BlockEntry entry;
+            entry.x = read_value<int32_t>(payload, 0);
+            entry.y = read_value<int32_t>(payload, 4);
+            entry.z = read_value<int32_t>(payload, 8);
+            entry.runtime_id = read_value<uint32_t>(payload, 12);
+            entry.flags = read_value<int32_t>(payload, 16);
+            if (entry.y >= -512 && entry.y <= 512 && std::abs(entry.x) < 30000000 &&
+                std::abs(entry.z) < 30000000) {
+                std::lock_guard lock(world_mutex());
+                auto& blocks = world_state().blocks;
+                if (blocks.size() > 65536) {
+                    blocks.clear();
+                }
+                const uint64_t key = (static_cast<uint64_t>(entry.x & 0x3FFFFFF) << 38) |
+                                     (static_cast<uint64_t>(entry.z & 0x3FFFFFF) << 12) |
+                                     static_cast<uint64_t>(entry.y + 512);
+                blocks[key] = entry;
+            }
+        } else if (packet_id == kPacketSetHealth) {
             handle_outgoing_health(player, packet);
         } else if (packet_id == kPacketRespawn) {
             PlayerState state;
@@ -913,6 +1002,62 @@ int packet_player_health(void* player) {
 void packet_forget_player(void* player) {
     std::lock_guard lock(state_mutex());
     player_states().erase(player);
+}
+
+bool packet_block_at(int x, int y, int z, uint32_t& runtime_id, int& flags) {
+    const uint64_t key = (static_cast<uint64_t>(x & 0x3FFFFFF) << 38) |
+                         (static_cast<uint64_t>(z & 0x3FFFFFF) << 12) |
+                         static_cast<uint64_t>(y + 512);
+    std::lock_guard lock(world_mutex());
+    const auto& blocks = world_state().blocks;
+    const auto it = blocks.find(key);
+    if (it == blocks.end()) {
+        return false;
+    }
+    runtime_id = it->second.runtime_id;
+    flags = it->second.flags;
+    return true;
+}
+
+void packet_observe_outgoing(void* player, void* packet) {
+    const int packet_id = packet_id_for(packet);
+    if (player == nullptr || packet_id < 0) {
+        return;
+    }
+    PlayerView view = make_player_view(player);
+    if (packet_id == kPacketSetTime) {
+        const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+        const int ticks = read_value<int32_t>(payload, 0);
+        std::lock_guard lock(world_mutex());
+        world_state().time = ticks;
+        world_state().time_valid = true;
+    } else if (packet_id == kPacketLevelEvent) {
+        const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+        const int16_t event_id = read_value<int16_t>(payload, 0);
+        std::lock_guard lock(world_mutex());
+        if (event_id == 3001) { world_state().weather = 1; world_state().weather_valid = true; }
+        else if (event_id == 3002) { world_state().weather = 0; world_state().weather_valid = true; }
+        else if (event_id == 3003) { world_state().weather = 2; world_state().weather_valid = true; }
+    }
+    (void)view;
+}
+
+int yoyo_debug_packet_id(void* packet) {
+    return packet_id_for(packet);
+}
+
+void packet_remember_vtable(void* packet, int packet_id) {
+    remember_packet_vtable(packet, packet_id);
+}
+
+int packet_world_time() {
+    std::lock_guard lock(world_mutex());
+    return world_state().time_valid ? world_state().time : -1;
+}
+
+int packet_world_weather() {
+    std::lock_guard lock(world_mutex());
+    return world_state().weather_valid ? world_state().weather : -1;
 }
 
 void packet_clear() {

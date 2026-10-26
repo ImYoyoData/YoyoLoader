@@ -56,6 +56,8 @@ bool live_send_form(void* player, std::string_view form_json, uint32_t* form_id 
 bool live_spawn_particle(void* player, std::string_view name, const LiveVec3& position);
 bool live_set_time(void* player, int ticks);
 bool live_set_weather(void* player, int weather); /* 0 clear, 1 rain, 2 thunder */
+/* UpdateBlockPacket: tell a client that a block changed. */
+bool live_set_block(void* player, int x, int y, int z, uint32_t runtime_id, int flags);
 bool live_transfer(void* player, std::string_view host, int port);
 
 /* Actor geometry.  getPosition returns the eye position BDS stores in

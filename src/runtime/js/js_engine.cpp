@@ -11,6 +11,7 @@
 #include "../runtime.h"
 #include "../worlds.h"
 
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -714,6 +715,111 @@ JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int, JSValueConst*) 
         "Use a player chat command via mc.regPlayerCmd instead.");
 }
 
+/* mc.getTime(TimeID): 0 daytime, 1 gametime, 2 day.  Read from packets. */
+JSValue mc_get_time(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    int32_t kind = 0;
+    if (argc > 0) {
+        JS_ToInt32(ctx, &kind, argv[0]);
+    }
+    const int ticks = packet_world_time();
+    if (ticks < 0) {
+        return JS_ThrowInternalError(
+            ctx, "getTime needs an observed SetTimePacket; call mc.setTime first or wait for a tick update");
+    }
+    const int day = ticks / 24000;
+    switch (kind) {
+    case 1: return JS_NewInt32(ctx, ticks % 24000);
+    case 2: return JS_NewInt32(ctx, day);
+    default: return JS_NewInt32(ctx, ticks);
+    }
+}
+
+/* mc.getWeather(): 0 sunny, 1 rain, 2 thunder. */
+JSValue mc_get_weather(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    const int weather = packet_world_weather();
+    if (weather < 0) {
+        return JS_ThrowInternalError(
+            ctx, "getWeather needs an observed weather update; call mc.setWeather first");
+    }
+    return JS_NewInt32(ctx, weather);
+}
+
+/*
+ * mc.getBlock(pos) / mc.getBlock(x, y, z, dimid).
+ *
+ * BDS does not expose a BlockSource entry point with a stable signature, so
+ * the block is read from the UpdateBlock traffic the server already sent this
+ * client.  That is real data the client is rendering; the only limitation is
+ * that a chunk the client never loaded has no entry.
+ */
+JSValue mc_get_block(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    double x = 0, y = 0, z = 0;
+    int dimid = 0;
+    if (!read_position_args(ctx, argc, argv, x, y, z, dimid, 0)) {
+        return JS_ThrowTypeError(ctx, "getBlock(pos) or getBlock(x, y, z[, dimid]) requires a position");
+    }
+    const int bx = static_cast<int>(std::floor(x));
+    const int by = static_cast<int>(std::floor(y));
+    const int bz = static_cast<int>(std::floor(z));
+    uint32_t runtime_id = 0;
+    int flags = 0;
+    if (!packet_block_at(bx, by, bz, runtime_id, flags)) {
+        return JS_NULL;
+    }
+    JSValue block = make_block_object(ctx, bx, by, bz, dimid);
+    JS_SetPropertyStr(ctx, block, "runtimeId", JS_NewInt64(ctx, static_cast<int64_t>(runtime_id)));
+    JS_SetPropertyStr(ctx, block, "isAir", JS_NewBool(ctx, runtime_id == 0));
+    return block;
+}
+
+/*
+ * mc.setBlock(pos, name) / mc.setBlock(x, y, z, dimid, name[, runtimeId]).
+ *
+ * Sends UpdateBlockPacket to every online player.  The server's own world data
+ * is not modified, so re-entering the chunk restores the original block; this
+ * is a client-visible change only, which is the honest limit of doing this
+ * without a BlockSource entry point.
+ */
+JSValue mc_set_block(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    double x = 0, y = 0, z = 0;
+    int dimid = 0;
+    std::string name;
+    int32_t runtime_id = -1;
+    if (argc >= 5) {
+        if (!read_position_args(ctx, 4, argv, x, y, z, dimid, 0)) {
+            return JS_ThrowTypeError(ctx, "setBlock requires numeric coordinates");
+        }
+        name = to_std_string(ctx, argv[4]);
+        if (argc > 5) JS_ToInt32(ctx, &runtime_id, argv[5]);
+    } else if (argc >= 2) {
+        if (!read_position_args(ctx, 1, argv, x, y, z, dimid, 0)) {
+            return JS_ThrowTypeError(ctx, "setBlock(pos, name) requires a position object");
+        }
+        name = to_std_string(ctx, argv[1]);
+        if (argc > 2) JS_ToInt32(ctx, &runtime_id, argv[2]);
+    } else {
+        return JS_ThrowTypeError(ctx, "setBlock(pos, name) requires a position and a block name");
+    }
+    (void)name;
+    if (runtime_id < 0) {
+        return JS_ThrowInternalError(
+            ctx,
+            "setBlock needs an explicit block runtime id: the block-name table is version specific, "
+            "so call setBlock(pos, name, runtimeId)");
+    }
+    const int bx = static_cast<int>(std::floor(x));
+    const int by = static_cast<int>(std::floor(y));
+    const int bz = static_cast<int>(std::floor(z));
+    bool any = false;
+    for (const auto& info : players_online()) {
+        if (info.handle != nullptr &&
+            live_set_block(info.handle, bx, by, bz, static_cast<uint32_t>(runtime_id), 0)) {
+            any = true;
+        }
+    }
+    return JS_NewBool(ctx, any);
+}
+
 JSValue mc_unsupported(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return unsupported(ctx, "this mc function is not implemented for the current BDS build");
 }
@@ -851,17 +957,17 @@ void register_mc(JSContext* ctx) {
     JS_SetPropertyStr(ctx, mc, "runcmd", JS_NewCFunction(ctx, mc_runcmd_unavailable, "runcmd", 1));
     JS_SetPropertyStr(ctx, mc, "runcmdEx",
                       JS_NewCFunction(ctx, mc_runcmd_unavailable, "runcmdEx", 1));
-    JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_stub, "getBlock", 1));
-    JS_SetPropertyStr(ctx, mc, "setBlock", JS_NewCFunction(ctx, mc_stub, "setBlock", 2));
+    JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_get_block, "getBlock", 4));
+    JS_SetPropertyStr(ctx, mc, "setBlock", JS_NewCFunction(ctx, mc_set_block, "setBlock", 6));
     JS_SetPropertyStr(ctx, mc, "spawnParticle", JS_NewCFunction(ctx, mc_spawn_particle, "spawnParticle", 5));
     JS_SetPropertyStr(ctx, mc, "spawnItem", JS_NewCFunction(ctx, mc_stub, "spawnItem", 2));
     JS_SetPropertyStr(ctx, mc, "spawnMob", JS_NewCFunction(ctx, mc_stub, "spawnMob", 2));
     JS_SetPropertyStr(ctx, mc, "explode", JS_NewCFunction(ctx, mc_stub, "explode", 4));
     JS_SetPropertyStr(ctx, mc, "getAllEntities", JS_NewCFunction(ctx, mc_stub, "getAllEntities", 0));
     JS_SetPropertyStr(ctx, mc, "getEntities", JS_NewCFunction(ctx, mc_stub, "getEntities", 1));
-    JS_SetPropertyStr(ctx, mc, "getTime", JS_NewCFunction(ctx, mc_stub, "getTime", 1));
+    JS_SetPropertyStr(ctx, mc, "getTime", JS_NewCFunction(ctx, mc_get_time, "getTime", 1));
     JS_SetPropertyStr(ctx, mc, "setTime", JS_NewCFunction(ctx, mc_set_time, "setTime", 1));
-    JS_SetPropertyStr(ctx, mc, "getWeather", JS_NewCFunction(ctx, mc_stub, "getWeather", 0));
+    JS_SetPropertyStr(ctx, mc, "getWeather", JS_NewCFunction(ctx, mc_get_weather, "getWeather", 0));
     JS_SetPropertyStr(ctx, mc, "setWeather", JS_NewCFunction(ctx, mc_set_weather, "setWeather", 1));
     JS_SetPropertyStr(ctx, mc, "getStructure", JS_NewCFunction(ctx, mc_stub, "getStructure", 2));
     JS_SetPropertyStr(ctx, mc, "getPlayerNbt", JS_NewCFunction(ctx, mc_stub, "getPlayerNbt", 1));
@@ -1040,6 +1146,25 @@ JSValue player_runcmd_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
         ctx, "runcmd is not implemented by YoyoLoader yet (see docs/API_COVERAGE.md)");
 }
 
+/*
+ * Inventory access needs the live Container/ItemStack ABI, which is one of the
+ * most version-fragile parts of BDS.  Until that is reverse engineered per
+ * build, this refuses by name instead of returning an empty container that
+ * would silently break plugin logic.
+ */
+JSValue player_inventory_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_ThrowInternalError(
+        ctx,
+        "inventory access (giveItem/getInventory/getArmor/getEnderChest) is not implemented by "
+        "YoyoLoader: it needs the version-specific Container/ItemStack layout");
+}
+
+JSValue player_nbt_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_ThrowInternalError(
+        ctx, "player NBT is not implemented by YoyoLoader: full player NBT serialisation is the most "
+             "version-fragile area of BDS");
+}
+
 JSValue player_send_form(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 1 || !JS_IsObject(argv[0])) {
         return JS_ThrowTypeError(ctx, "sendForm(form[, callback]) requires a form object");
@@ -1156,6 +1281,18 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
     JS_SetPropertyStr(ctx, object, "isOP", JS_NewCFunction(ctx, player_is_op, "isOP", 0));
     JS_SetPropertyStr(ctx, object, "runcmd", JS_NewCFunction(ctx, player_runcmd_stub, "runcmd", 1));
     JS_SetPropertyStr(ctx, object, "isSneaking_llse", JS_NewCFunction(ctx, player_is_sneaking, "isSneaking", 0));
+    JS_SetPropertyStr(ctx, object, "giveItem",
+                      JS_NewCFunction(ctx, player_inventory_stub, "giveItem", 2));
+    JS_SetPropertyStr(ctx, object, "getInventory",
+                      JS_NewCFunction(ctx, player_inventory_stub, "getInventory", 0));
+    JS_SetPropertyStr(ctx, object, "getArmor",
+                      JS_NewCFunction(ctx, player_inventory_stub, "getArmor", 0));
+    JS_SetPropertyStr(ctx, object, "getEnderChest",
+                      JS_NewCFunction(ctx, player_inventory_stub, "getEnderChest", 0));
+    JS_SetPropertyStr(ctx, object, "getNbt",
+                      JS_NewCFunction(ctx, player_nbt_stub, "getNbt", 0));
+    JS_SetPropertyStr(ctx, object, "setNbt",
+                      JS_NewCFunction(ctx, player_nbt_stub, "setNbt", 1));
 
     /* pos / feetPos / blockPos as properties, matching LLSE. */
     JSValue pos_getter = JS_NewCFunction(ctx,

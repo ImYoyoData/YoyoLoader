@@ -155,17 +155,32 @@ anything else lets it through.
 `onServerStarted` → `onServerReady`, `onChangeDim` → `onPlayerChangeDimension`,
 `onexit` → `onLeft`, `onMobDie` → `onPlayerDie` (player deaths only).
 
-**World effects (implemented, verified on a live server)**
+**World effects and world state (implemented, verified on a live server)**
 
 ```js
+// write side — sends the packets BDS itself sends
 mc.spawnParticle(pl.pos, "minecraft:heart_particle");
 mc.spawnParticle(x, y, z, dimid, "minecraft:heart_particle");
-mc.setTime(6000);        // client-visible world time
-mc.setWeather(1);        // 0 clear, 1 rain, 2 thunder
+mc.setTime(6000);
+mc.setWeather(1);           // 0 clear, 1 rain, 2 thunder
+
+// read side — served from packets the server already sent to this client
+mc.getTime();               // ticks; 0 daytime, 1 gametime, 2 day
+mc.getWeather();            // 0/1/2
+mc.getBlock(pos);           // Block or null when that position was never updated
+mc.setBlock(pos, name, runtimeId);   // UpdateBlockPacket to all players
 ```
 
-These build the same packets BDS sends itself. They change what clients see;
-they do not rewrite engine state, so they are safe on any build.
+`getTime` / `getWeather` / `getBlock` are backed by an observer on the outgoing
+packet stream, including packets YoyoLoader builds itself. That means they are
+always the values the client is actually rendering, and they cannot desynchronise
+from the server. The trade-off is coverage: a value that was never sent (a chunk
+the client never received, or time before any `SetTimePacket`) returns `null` /
+throws rather than guessing from engine memory.
+
+`setBlock` needs an explicit `runtimeId` because the block-name → runtime-id
+table is version specific. It changes what clients render; it does not modify
+the server's world data, so re-entering the chunk restores the original block.
 
 **Deliberately not implemented** — these throw a precise message instead of
 being silently absent:
@@ -173,7 +188,7 @@ being silently absent:
 | API | Why |
 |---|---|
 | `mc.runcmd` / `mc.runcmdEx` | needs a `CommandOrigin` whose layout is version-specific. Synthesising a `CommandRequestPacket` *does* execute the command, but the server crashes right after, so it is refused rather than shipped broken. Use `mc.regPlayerCmd` for player-issued commands. |
-| `mc.getBlock` / `mc.setBlock` | needs live `BlockSource` + `Block` layout |
+| — | `getBlock`/`setBlock` are implemented via the packet cache described above |
 | `pl.getInventory` / `giveItem` / `getArmor` / `getEnderChest` | needs live `Container` + `ItemStack` ABI |
 | `mc.getPlayerNbt` / `setPlayerNbt` | full player NBT serialisation is the most version-fragile area |
 | `mc.getTime` / `mc.getWeather` | read side needs `Level`/`WeatherManager` state; only the write helpers above are implemented |
