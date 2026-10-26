@@ -33,3 +33,6 @@ _bds/
 _bot*/
 
 dist/
+
+_ci/
+_accept/
