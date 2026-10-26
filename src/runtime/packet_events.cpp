@@ -10,7 +10,9 @@
 #include "runtime.h"
 
 #include <cstdint>
+#include <chrono>
 #include <cstring>
+#include <thread>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -754,7 +756,58 @@ void create_packet_detour(void* output, int packet_id) {
 }
 #endif
 
+
 } // namespace
+
+/* Write a native std::string into a freshly created packet field. */
+bool write_owned_string_at(void* address, std::string_view value) {
+    if (address == nullptr) {
+        return false;
+    }
+    const NativeAbi abi = native_abi();
+    auto* base = static_cast<unsigned char*>(address);
+    std::memset(base, 0, native_string_size(abi));
+    if (value.empty()) {
+        if (abi == NativeAbi::Msvc) {
+            const size_t capacity = 15;
+            std::memcpy(base + 24, &capacity, sizeof(capacity));
+        }
+        return true;
+    }
+    char* data = static_cast<char*>(std::malloc(value.size() + 1));
+    if (data == nullptr) {
+        return false;
+    }
+    std::memcpy(data, value.data(), value.size());
+    data[value.size()] = 0;
+    if (abi == NativeAbi::Msvc) {
+        if (value.size() <= 15) {
+            std::memcpy(base, data, value.size() + 1);
+            std::free(data);
+            const size_t capacity = 15;
+            std::memcpy(base + 24, &capacity, sizeof(capacity));
+        } else {
+            std::memcpy(base, &data, sizeof(data));
+            const size_t capacity = value.size();
+            std::memcpy(base + 24, &capacity, sizeof(capacity));
+        }
+        size_t size = value.size();
+        std::memcpy(base + 16, &size, sizeof(size));
+    } else {
+        if (value.size() <= 22) {
+            base[0] = static_cast<unsigned char>(value.size() << 1);
+            std::memcpy(base + 1, data, value.size() + 1);
+            std::free(data);
+        } else {
+            const uint64_t capacity_field = (static_cast<uint64_t>(value.size()) << 1) | 1u;
+            std::memcpy(base, &capacity_field, sizeof(capacity_field));
+            size_t size = value.size();
+            std::memcpy(base + 8, &size, sizeof(size));
+            std::memcpy(base + 16, &data, sizeof(data));
+        }
+    }
+    return true;
+}
 
 bool install_packet_hooks() {
     if (g_packet_hook_installed) {

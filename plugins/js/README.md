@@ -155,11 +155,32 @@ anything else lets it through.
 `onServerStarted` → `onServerReady`, `onChangeDim` → `onPlayerChangeDimension`,
 `onexit` → `onLeft`, `onMobDie` → `onPlayerDie` (player deaths only).
 
-**Unimplemented LLSE APIs** (`mc.runcmd`, `mc.getBlock`, `mc.setBlock`,
-`mc.spawnParticle`, `mc.getTime`, `mc.setTime`, `mc.getWeather`, `mc.setWeather`,
-`mc.getPlayerNbt`, `mc.setPlayerNbt`, entity spawning, …) throw
-`this LegacyScriptEngine API is not implemented by YoyoLoader yet` rather than
-being silently absent.
+**World effects (implemented, verified on a live server)**
+
+```js
+mc.spawnParticle(pl.pos, "minecraft:heart_particle");
+mc.spawnParticle(x, y, z, dimid, "minecraft:heart_particle");
+mc.setTime(6000);        // client-visible world time
+mc.setWeather(1);        // 0 clear, 1 rain, 2 thunder
+```
+
+These build the same packets BDS sends itself. They change what clients see;
+they do not rewrite engine state, so they are safe on any build.
+
+**Deliberately not implemented** — these throw a precise message instead of
+being silently absent:
+
+| API | Why |
+|---|---|
+| `mc.runcmd` / `mc.runcmdEx` | needs a `CommandOrigin` whose layout is version-specific. Synthesising a `CommandRequestPacket` *does* execute the command, but the server crashes right after, so it is refused rather than shipped broken. Use `mc.regPlayerCmd` for player-issued commands. |
+| `mc.getBlock` / `mc.setBlock` | needs live `BlockSource` + `Block` layout |
+| `pl.getInventory` / `giveItem` / `getArmor` / `getEnderChest` | needs live `Container` + `ItemStack` ABI |
+| `mc.getPlayerNbt` / `setPlayerNbt` | full player NBT serialisation is the most version-fragile area |
+| `mc.getTime` / `mc.getWeather` | read side needs `Level`/`WeatherManager` state; only the write helpers above are implemented |
+| entity spawning / `mc.getAllEntities` | needs `ActorFactory` and `Level` actor iteration |
+
+The rule (see `PROJECT_RULES.md` 1.6) is that a crash is worse than a missing
+feature: anything that cannot be done safely refuses with a name, not a crash.
 
 ## Player
 

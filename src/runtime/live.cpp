@@ -26,6 +26,9 @@ constexpr int kPacketSetTitle = 88;
 constexpr int kPacketShowModalForm = 100;
 constexpr int kPacketToastRequest = 186;
 constexpr int kPacketTransfer = 85;
+constexpr int kPacketLevelEvent = 25;
+constexpr int kPacketSetTime = 10;
+constexpr int kPacketSpawnParticleEffect = 118;
 
 constexpr uint32_t kRuntimeIdHash = 0xFC0DBBB5u;
 constexpr uint32_t kUniqueIdHash = 0x18F957AFu;
@@ -457,6 +460,75 @@ bool live_send_form(void* player, std::string_view form_json, uint32_t* form_id)
         *form_id = assigned;
     }
     return send_network_packet(player, packet.get());
+}
+
+/*
+ * LevelEventPacket with the "particle" event id.  The payload is
+ * (int16 event_id, float x, float y, float z, int32 data); the particle name
+ * travels in the trailing string.  If a build changes the layout the packet
+ * still serialises, the client just ignores it, so this is safe to attempt.
+ */
+bool live_spawn_particle(void* player, std::string_view name, const LiveVec3& position) {
+    NativePacket packet(kPacketSpawnParticleEffect);
+    if (!packet) {
+        log_write(LogLevel::Warn, "SpawnParticleEffectPacket allocation failed");
+        return false;
+    }
+    auto* payload = static_cast<unsigned char*>(packet.get()) + kPacketBaseSize;
+    const int32_t dimension = 0;
+    std::memcpy(payload, &dimension, sizeof(dimension));
+    payload[4] = 0xFF; /* actor id: none */
+    const float xyz[3] = {static_cast<float>(position.x), static_cast<float>(position.y),
+                          static_cast<float>(position.z)};
+    std::memcpy(payload + 8, xyz, sizeof(xyz));
+    if (!write_owned_string(payload + 20, name)) {
+        free_owned_string(payload + 20);
+        return false;
+    }
+    const bool sent = send_network_packet(player, packet.get());
+    free_owned_string(payload + 20);
+    return sent;
+}
+
+/* SetTimePacket: int32 world time. */
+bool live_set_time(void* player, int ticks) {
+    NativePacket packet(kPacketSetTime);
+    if (!packet) {
+        log_write(LogLevel::Warn, "SetTimePacket allocation failed");
+        return false;
+    }
+    auto* payload = static_cast<unsigned char*>(packet.get()) + kPacketBaseSize;
+    std::memcpy(payload, &ticks, sizeof(ticks));
+    return send_network_packet(player, packet.get());
+}
+
+/*
+ * LevelEventPacket: 3001 = start rain, 3002 = stop rain, 3003 = start thunder,
+ * 1003 = stop thunder.  `data` carries the rain level.
+ */
+bool live_set_weather(void* player, int weather) {
+    const auto send_event = [&](int16_t event_id, int32_t data) {
+        NativePacket packet(kPacketLevelEvent);
+        if (!packet) {
+            return false;
+        }
+        auto* payload = static_cast<unsigned char*>(packet.get()) + kPacketBaseSize;
+        std::memcpy(payload, &event_id, sizeof(event_id));
+        const float zeros[3] = {0.0f, 0.0f, 0.0f};
+        std::memcpy(payload + 2, zeros, sizeof(zeros));
+        std::memcpy(payload + 14, &data, sizeof(data));
+        return send_network_packet(player, packet.get());
+    };
+    switch (weather) {
+    case 0: /* clear */
+        return send_event(3002, 0) && send_event(1003, 0);
+    case 1: /* rain */
+        return send_event(3001, 10000);
+    case 2: /* thunder */
+        return send_event(3001, 10000) && send_event(3003, 10000);
+    default:
+        return false;
+    }
 }
 
 bool live_transfer(void* player, std::string_view host, int port) {

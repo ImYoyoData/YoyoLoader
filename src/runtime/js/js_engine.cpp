@@ -644,6 +644,76 @@ JSValue mc_get_online_player_num(JSContext* ctx, JSValueConst, int, JSValueConst
 
 JSValue mc_listen(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
 
+/* mc.spawnParticle(pos, name) / mc.spawnParticle(x, y, z, dimid, name). */
+JSValue mc_spawn_particle(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "spawnParticle(pos, name) requires a position and a name");
+    double x = 0.0, y = 0.0, z = 0.0;
+    int dimid = 0;
+    std::string name;
+    if (argc >= 5) {
+        if (!read_position_args(ctx, 4, argv, x, y, z, dimid, 0)) {
+            return JS_ThrowTypeError(ctx, "spawnParticle(x, y, z, dimid, name) requires numeric coordinates");
+        }
+        name = to_std_string(ctx, argv[4]);
+    } else {
+        if (!read_position_args(ctx, 1, argv, x, y, z, dimid, 0)) {
+            return JS_ThrowTypeError(ctx, "spawnParticle(pos, name) requires a position object");
+        }
+        name = to_std_string(ctx, argv[1]);
+    }
+    bool any = false;
+    for (const auto& info : players_online()) {
+        if (info.handle != nullptr && live_spawn_particle(info.handle, name, LiveVec3{x, y, z})) {
+            any = true;
+        }
+    }
+    return JS_NewBool(ctx, any);
+}
+
+/* mc.setTime(ticks) / mc.getTime() — client-visible world time. */
+JSValue mc_set_time(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setTime(ticks) requires a tick count");
+    int32_t ticks = 0;
+    if (JS_ToInt32(ctx, &ticks, argv[0]) < 0) return JS_EXCEPTION;
+    bool any = false;
+    for (const auto& info : players_online()) {
+        if (info.handle != nullptr && live_set_time(info.handle, ticks)) {
+            any = true;
+        }
+    }
+    return JS_NewBool(ctx, any);
+}
+
+/* mc.setWeather(0 clear | 1 rain | 2 thunder). */
+JSValue mc_set_weather(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setWeather(id) requires 0, 1 or 2");
+    int32_t weather = 0;
+    if (JS_ToInt32(ctx, &weather, argv[0]) < 0) return JS_EXCEPTION;
+    bool any = false;
+    for (const auto& info : players_online()) {
+        if (info.handle != nullptr && live_set_weather(info.handle, weather)) {
+            any = true;
+        }
+    }
+    return JS_NewBool(ctx, any);
+}
+
+/*
+ * mc.runcmd / mc.runcmdEx are not implemented.
+ *
+ * Running a command requires a CommandOrigin whose layout is version
+ * dependent.  Synthesising a CommandRequestPacket was tried and it executes the
+ * command, but the server crashes immediately afterwards because the origin
+ * payload the engine expects cannot be reproduced safely from outside.  A crash
+ * is worse than a missing feature, so this refuses with a clear message.
+ */
+JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_ThrowInternalError(
+        ctx,
+        "runcmd is not implemented by YoyoLoader: it needs a version-specific CommandOrigin. "
+        "Use a player chat command via mc.regPlayerCmd instead.");
+}
+
 JSValue mc_unsupported(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return unsupported(ctx, "this mc function is not implemented for the current BDS build");
 }
@@ -778,20 +848,21 @@ void register_mc(JSContext* ctx) {
                       JS_NewCFunction(ctx, mc_worlds_is_controller, "isController", 0));
     JS_SetPropertyStr(ctx, worlds, "current", JS_NewCFunction(ctx, mc_worlds_current, "current", 0));
     JS_SetPropertyStr(ctx, mc, "worlds", worlds);
-    JS_SetPropertyStr(ctx, mc, "runcmd", JS_NewCFunction(ctx, mc_stub, "runcmd", 1));
-    JS_SetPropertyStr(ctx, mc, "runcmdEx", JS_NewCFunction(ctx, mc_unsupported, "runcmdEx", 1));
+    JS_SetPropertyStr(ctx, mc, "runcmd", JS_NewCFunction(ctx, mc_runcmd_unavailable, "runcmd", 1));
+    JS_SetPropertyStr(ctx, mc, "runcmdEx",
+                      JS_NewCFunction(ctx, mc_runcmd_unavailable, "runcmdEx", 1));
     JS_SetPropertyStr(ctx, mc, "getBlock", JS_NewCFunction(ctx, mc_stub, "getBlock", 1));
     JS_SetPropertyStr(ctx, mc, "setBlock", JS_NewCFunction(ctx, mc_stub, "setBlock", 2));
-    JS_SetPropertyStr(ctx, mc, "spawnParticle", JS_NewCFunction(ctx, mc_stub, "spawnParticle", 2));
+    JS_SetPropertyStr(ctx, mc, "spawnParticle", JS_NewCFunction(ctx, mc_spawn_particle, "spawnParticle", 5));
     JS_SetPropertyStr(ctx, mc, "spawnItem", JS_NewCFunction(ctx, mc_stub, "spawnItem", 2));
     JS_SetPropertyStr(ctx, mc, "spawnMob", JS_NewCFunction(ctx, mc_stub, "spawnMob", 2));
     JS_SetPropertyStr(ctx, mc, "explode", JS_NewCFunction(ctx, mc_stub, "explode", 4));
     JS_SetPropertyStr(ctx, mc, "getAllEntities", JS_NewCFunction(ctx, mc_stub, "getAllEntities", 0));
     JS_SetPropertyStr(ctx, mc, "getEntities", JS_NewCFunction(ctx, mc_stub, "getEntities", 1));
     JS_SetPropertyStr(ctx, mc, "getTime", JS_NewCFunction(ctx, mc_stub, "getTime", 1));
-    JS_SetPropertyStr(ctx, mc, "setTime", JS_NewCFunction(ctx, mc_stub, "setTime", 1));
+    JS_SetPropertyStr(ctx, mc, "setTime", JS_NewCFunction(ctx, mc_set_time, "setTime", 1));
     JS_SetPropertyStr(ctx, mc, "getWeather", JS_NewCFunction(ctx, mc_stub, "getWeather", 0));
-    JS_SetPropertyStr(ctx, mc, "setWeather", JS_NewCFunction(ctx, mc_stub, "setWeather", 1));
+    JS_SetPropertyStr(ctx, mc, "setWeather", JS_NewCFunction(ctx, mc_set_weather, "setWeather", 1));
     JS_SetPropertyStr(ctx, mc, "getStructure", JS_NewCFunction(ctx, mc_stub, "getStructure", 2));
     JS_SetPropertyStr(ctx, mc, "getPlayerNbt", JS_NewCFunction(ctx, mc_stub, "getPlayerNbt", 1));
     JS_SetPropertyStr(ctx, mc, "setPlayerNbt", JS_NewCFunction(ctx, mc_stub, "setPlayerNbt", 2));

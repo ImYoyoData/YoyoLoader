@@ -47,6 +47,15 @@ bool live_send_toast(void* player, std::string_view title, std::string_view cont
 /* Player::sendForm(ModalFormRequestPacket).  `form_id`, when not null,
  * receives the id assigned to the packet so a response can be matched. */
 bool live_send_form(void* player, std::string_view form_json, uint32_t* form_id = nullptr);
+
+/*
+ * Client-visible world effects.  These build the same packets BDS itself
+ * sends; they change what clients see and are safe on every build, unlike
+ * writing engine state whose layout we have not verified.
+ */
+bool live_spawn_particle(void* player, std::string_view name, const LiveVec3& position);
+bool live_set_time(void* player, int ticks);
+bool live_set_weather(void* player, int weather); /* 0 clear, 1 rain, 2 thunder */
 bool live_transfer(void* player, std::string_view host, int port);
 
 /* Actor geometry.  getPosition returns the eye position BDS stores in
