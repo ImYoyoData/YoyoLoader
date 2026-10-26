@@ -737,10 +737,16 @@ JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int argc, JSValueCon
      * crashing the process.  Player-facing commands are handled by
      * intercepting "/" chat in plugins (see plugins/*.js).
      */
+    /*
+     * Measured behaviour: the packet executes the command, then BDS crashes.
+     * Keeping the packet alive forever does not help, so the crash comes from
+     * engine state the dispatcher expects after dispatch -- something we cannot
+     * reproduce from outside.  Refuse instead of killing the server.
+     */
     return JS_ThrowInternalError(
         ctx,
-        "runcmd is not available: use a plugin-level '/' command handler instead "
-        "(mc.listen('onChat') with a leading slash)");
+        "runcmd is not available: BDS crashes after a synthetically dispatched CommandRequestPacket. "
+        "Use mc.regPlayerCmd for plugin commands.");
 }
 
 /* mc.getTime(TimeID): 0 daytime, 1 gametime, 2 day.  Read from packets. */
@@ -849,7 +855,10 @@ JSValue mc_set_block(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 }
 
 JSValue mc_unsupported(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-    return unsupported(ctx, "this mc function is not implemented for the current BDS build");
+    return JS_ThrowInternalError(
+        ctx,
+        "this mc function is not implemented: it needs a version-specific engine object layout. "
+        "See wiki/versions.md.");
 }
 
 /*
@@ -857,9 +866,19 @@ JSValue mc_unsupported(JSContext* ctx, JSValueConst, int, JSValueConst*) {
  * from LLSE gets a precise "not supported on this build" message instead of
  * "undefined is not a function", which makes the gap visible immediately.
  */
-JSValue mc_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+/*
+ * Every unimplemented LLSE entry point lands here.  The message names the API
+ * and points at the reason, so a migrating plugin author sees exactly what is
+ * missing instead of "undefined is not a function".
+ */
+JSValue mc_stub(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    (void)argc;
+    (void)argv;
     return JS_ThrowInternalError(
-        ctx, "this LegacyScriptEngine API is not implemented by YoyoLoader yet; see docs/API_COVERAGE.md");
+        ctx,
+        "this LegacyScriptEngine API is not implemented by YoyoLoader: it needs a version-specific "
+        "engine object layout (Container / ItemStack / ActorFactory / CommandOrigin). "
+        "See wiki/versions.md for the current capability matrix.");
 }
 
 /* mc.listen(EventClass) style is not supported; only string names are. */

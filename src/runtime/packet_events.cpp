@@ -1046,8 +1046,6 @@ bool packet_run_command(void* player, std::string_view command) {
      */
     std::shared_ptr<void> dispatched = packet;
     dispatcher->handle(network_id.data(), callback, &dispatched);
-    /* Leak-free hand-off: the server owns its copy; drop ours last. */
-    dispatched.reset();
 #else
     dispatcher->handle(network_id.data(), callback, &raw);
 #endif

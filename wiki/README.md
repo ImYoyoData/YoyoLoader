@@ -19,6 +19,7 @@ YoyoLoader 的完整文档。API 与事件有意向
 | [NBT](nbt.md) | NBT 对象与序列化 |
 | [版本支持](versions.md) | 支持矩阵与降级行为 |
 | [C++ / Go 插件](native-plugins.md) | C ABI v3 |
+| [发布流程](releasing.md) | 分支约定、GitHub Actions、压缩包结构 |
 
 ## 设计取舍
 

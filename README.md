@@ -24,7 +24,17 @@ YoyoLoader 是一个 C++20 注入式 mod loader，为 **Minecraft Bedrock Dedica
 ## 文档
 
 完整文档见 [wiki/](wiki/README.md)：插件格式、事件、命令、玩家/世界对象、
-表单、配置、NBT、版本支持、C++/Go 插件。
+表单、配置、NBT、版本支持、C++/Go 插件、发布流程。
+
+## 下载与安装
+
+从 Releases 下载对应平台的压缩包，**直接解压到 BDS 服务器根目录**，然后运行
+`yoyo.exe`（Windows）或 `./yoyo`（Linux）代替原版服务器程序。启动器会自动找到
+`bedrock_server(.exe)` 并注入运行时。
+
+压缩包自带 `home` / `title` / `tpa` 三个示例插件，解压即可用。
+
+发布流程见 [wiki/releasing.md](wiki/releasing.md)。
 
 ## 1. 设计选择
 

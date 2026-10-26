@@ -66,6 +66,49 @@ try {
 
 **不会**静默返回错误数据。
 
+## 实测记录
+
+### 1.26.52.3（Windows，完整支持）
+
+```text
+version support: 1.26.52.3 (windows) build=d9f9837c...
+inline hook installed tryToLoadPlayer / SetLocalPlayerAsInitialized /
+                     disconnectClientWithMessage / TextPacket / _onPlayerLeft
+Level::tick inline hook installed
+plugin loader finished: 0 native, 4 javascript, 0 skipped
+[final] home=true | title=true | tpa=true | unknown=true |
+        setTime=true | setWeather=true | spawnParticle=true |
+        pos.dimid=true | tell=true | getInventory=ERR
+```
+
+### 1.26.70.21（Linux，部分支持）
+
+```text
+version support: 1.26.70.21 (linux) build=519f9a2c...
+limited features on this build: pre_join event, chat event, leave event,
+  tick event, packet send events, player position/dimension, player rotation, ...
+inline hook installed SetLocalPlayerAsInitialized rva=0x9199160
+packet factory hook installed rva=0x9162360 length=12
+JS plugin loaded: home / title / tpa
+plugin loader finished: 0 native, 3 javascript, 0 skipped
+```
+
+### 插件隔离实测
+
+一个插件在 `onTick` 中持续抛异常 687 次：
+
+- 服务器进程存活
+- 其他插件的 `onJoin` 照常触发
+- 异常逐条记录到日志，不中断主循环
+
+### 依赖系统实测
+
+```text
+[ERROR] plugin 'cyc_a' has a dependency cycle: cyc_a -> cyc_b -> cyc_a
+[ERROR] plugin 'missing_dep' skipped: missing required dependency 'does_not_exist'
+[INFO]  plugin loader finished: 0 native, 4 javascript, 0 skipped
+```
+
 ## 项目规则
 
 完整约束见仓库根目录 [PROJECT_RULES.md](../PROJECT_RULES.md)。核心几条：
