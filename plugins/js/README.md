@@ -84,6 +84,83 @@ observed. `onPacketSend` skips high-volume chunk/level-sound packets.
 Other LLSE event names are accepted by `mc.listen` but only log a warning; they
 do not fire in this build.
 
+## LegacyScriptEngine compatibility
+
+YoyoLoader exposes an LLSE-shaped surface alongside its own API, so plugins
+written against
+[LegacyScriptEngine](https://docs.levimc.org/LegacyScriptEngine/zh/apis/) can
+usually run unmodified.
+
+**Positions**
+
+```js
+pl.pos        // FloatPos: x, y, z, dimid, dim ("主世界"), toString()
+pl.feetPos    // FloatPos
+pl.blockPos   // IntPos
+pl.direction  // DirectionAngle: pitch, yaw, toFacing() -> 0..3
+
+new IntPos(x, y, z, dimid)
+new FloatPos(x, y, z, dimid)
+new DirectionAngle(pitch, yaw)
+```
+
+`dimid` is `0` overworld, `1` nether, `2` end. `dim` is the LLSE display string.
+`dimension` / `dimensionName` are kept as aliases for older YoyoLoader plugins.
+
+**Player methods**
+
+| LLSE | YoyoLoader equivalent | Status |
+|---|---|---|
+| `pl.tell(msg[, type])` | `sendMessage` | ✅ type 0/1/4/5 mapped to raw/tip/system/popup |
+| `pl.sendText(msg[, type])` | `sendMessage` | ✅ |
+| `pl.setTitle(text[, type[, fadeIn, stay, fadeOut]])` | `sendTitle` | ✅ type 0 title, 1 actionbar, 2 subtitle |
+| `pl.sendToast(title, msg)` | `sendToast` | ✅ |
+| `pl.getPos()` / `getFeetPos()` / `getBlockPos()` | — | ✅ |
+| `pl.getDirection()` | `getRotation` | ✅ |
+| `pl.isOP()` | — | ✅ checks `yoyo_ops.txt` |
+| `pl.kick([msg])` | `kick` | ✅ |
+| `pl.transServer(host, port)` | `transfer` | ✅ |
+| `pl.setGameMode(mode)` | `setGameMode` | ✅ (capability-gated) |
+| `pl.runcmd(cmd)` | — | ❌ throws a named error |
+| `pl.getInventory()` / `giveItem` / `getArmor` | — | ❌ throws a named error |
+
+**Items and blocks**
+
+```js
+const it = mc.newItem("minecraft:bread", 3);
+it.type; it.name; it.id; it.count; it.maxCount; it.aux; it.damage;
+it.getNbt(); it.setNbt(nbt); it.clone(); it.isNull();
+```
+
+Block objects passed to block events carry `name`, `type`, `id`, `pos`
+(IntPos), `tileData`, `isAir`, `getType()`, `getPos()`.
+
+**Cancellation**
+
+LLSE cancels an interceptable event by **returning `false`** from the
+listener. YoyoLoader supports exactly that, and also keeps the older
+`event.cancelled = true` form:
+
+```js
+mc.listen("onChat", (pl, msg) => {
+    if (msg === "!cancelme") return false;   // LLSE style — event is dropped
+});
+```
+
+Verified on a real server: returning `false` drops the event, returning
+anything else lets it through.
+
+**Event name aliases**
+
+`onServerStarted` → `onServerReady`, `onChangeDim` → `onPlayerChangeDimension`,
+`onexit` → `onLeft`, `onMobDie` → `onPlayerDie` (player deaths only).
+
+**Unimplemented LLSE APIs** (`mc.runcmd`, `mc.getBlock`, `mc.setBlock`,
+`mc.spawnParticle`, `mc.getTime`, `mc.setTime`, `mc.getWeather`, `mc.setWeather`,
+`mc.getPlayerNbt`, `mc.setPlayerNbt`, entity spawning, …) throw
+`this LegacyScriptEngine API is not implemented by YoyoLoader yet` rather than
+being silently absent.
+
 ## Player
 
 Properties: `name`, `xuid`, `address`, `runtimeId`, `isOnline`.
