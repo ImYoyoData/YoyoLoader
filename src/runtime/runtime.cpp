@@ -1,5 +1,6 @@
 #include "runtime.h"
 
+#include "capabilities.h"
 #include "hooks.h"
 #include "live.h"
 #include "log.h"
@@ -47,10 +48,12 @@ void runtime_start() {
                   "unsupported build id; hooks will be found by signature and object layout is a fallback");
     }
 
+    log_capability_report();
+
     g_state.symbols = resolve_symbols(g_state.module.base, g_state.profile);
     log_write(LogLevel::Info, "symbol resolution: %s", describe_resolution(g_state.symbols).c_str());
-    if (!g_state.symbols.complete()) {
-        log_write(LogLevel::Error, "required hook targets could not be resolved; refusing to patch");
+    if (!g_state.symbols.any()) {
+        log_write(LogLevel::Error, "no hook targets could be resolved; refusing to patch");
         return;
     }
 

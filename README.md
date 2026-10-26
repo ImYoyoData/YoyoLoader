@@ -9,6 +9,13 @@ YoyoLoader 是一个 C++20 注入式 mod loader，为 **Minecraft Bedrock Dedica
 - 命名空间：`yoyo`
 - 插件：C++ / Go（C ABI）、JavaScript（内嵌 QuickJS-ng）
 
+**与 LegacyScriptEngine 的关系。** YoyoLoader 的事件与脚本 API 有意向
+[LegacyScriptEngine](https://docs.levimc.org/LegacyScriptEngine/zh/apis/) 对齐：`mc.listen`、
+`player.sendMessage` / `sendTitle` / `sendForm`、`setTimeout` / `setInterval`、
+`JsonConfigFile` / `IniConfigFile`、`File`、`mc.regPlayerCmd` 等都沿用相同命名与调用形式，
+目的是让为 LLSE 写的插件尽量不用改写就能运行。这不是逐字段复制：内部实现完全独立，
+只对齐插件作者看到的那一层。差异与未实现项见 [docs/API_COVERAGE.md](docs/API_COVERAGE.md)。
+
 **定位说明。** YoyoLoader 不是官方 Script API 的实现，也不是 LLSE 的替代品。它走的是
 外部注入 + 逆向定位的路线：能力边界比官方插件 API 大（可以接管 packet、做多进程世界、
 发送真实客户端包），代价是版本绑定、需要真实客户端回归。当前已用特征签名把“版本一更新
@@ -33,13 +40,28 @@ Linux:    cp yoyo bedrock_server_mod
 
 ## 2. 已验证环境
 
-| 平台 | BDS | Build ID | 实测内容 |
-|---|---|---|---|
-| Windows x64 | 1.26.52.3 | `d9f9837c2108f3824c4c44205044422e1` | 注入、事件、packet 事件、消息/标题/Toast/表单、位置/维度、传送、踢人、生命值、多世界、C++/JS 插件 |
-| Linux x64 | 1.26.52.3 | `c0ff36e2eacfc191f01e189237df71f139b5d04a` | 注入、事件、packet 事件、消息/标题/Toast/表单、位置/维度、传送、踢人、生命值、多世界、JS 插件 |
+### 2.1 版本支持表
 
-测试使用 NetherNet 传输的离线 bot（Windows 与 Linux 均在 Docker 中）连接真实 BDS。
-Linux runtime 在 Debian/glibc 2.36 + clang 20 下构建并加载；建议使用 LLD 链接。
+`支持状态` 指这个版本上有哪些能力经过实际验证。未列出的能力在该版本上会返回
+“当前版本不支持”的错误，而不是静默执行。启动时 `yoyo.log` 会打印同一份清单。
+
+| BDS 版本 | 平台 | Build ID | 支持状态 | 受限功能 |
+|---|---|---|---|---|
+| 1.26.52.3 | Windows x64 | `d9f9837c2108f3824c4c44205044422e1` | ✅ 完整 | 无 |
+| 1.26.52.3 | Linux x64 | `c0ff36e2eacfc191f01e189237df71f139b5d04a` | ✅ 完整 | 无 |
+| 1.26.70.21 | Windows x64 | `fd266068f00d540b4c4c44205044422e1` | 🟡 部分 | 无 `onPreJoin`、`onTick`、packet 事件；无位置/朝向/维度/游戏模式/生命值/传送/表单字段（对象布局未校验） |
+| 1.26.70.21 | Linux x64 | `519f9a2c3cdc31c85ef87dd2f128f79136f854d4` | 🟡 部分 | 仅 `onJoin` 与 packet 工厂 hook；无聊天/离开/tick、无对象布局相关能力 |
+| 其他版本 | 任意 | 未知 | 🟡 自动探测 | 靠特征签名尝试定位 hook；对象相关的全部能力默认关闭，直到运行时布局校验通过 |
+
+`✅ 完整` 表示上表所有能力都在该版本实测过。`🟡 部分` 表示只保证清单里列出的
+那几项，其余一律禁用。未知版本永远从“全部关闭”开始，绝不会因为“看起来像”就
+按旧布局读写内存。
+
+### 2.2 测试环境
+
+测试使用 NetherNet / RakNet 传输的离线 bot（Windows 与 Linux 均在 Docker 中）连接真实 BDS。
+Linux runtime 在 Debian/glibc 2.36 与 `gcc:13` 容器中构建；1.26.70.21 的 Linux 运行验证
+使用 `gcc:13` 容器 + `LD_PRELOAD` 注入。
 
 > 仅支持 x86-64。Windows 需要 MSVC 2022；Linux 需要 clang++ 20 或更新版本。
 

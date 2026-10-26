@@ -559,23 +559,35 @@ void* disconnect_original_fn() {
 
 bool install_player_hooks() {
     auto& rt = state();
-    if (!rt.symbols.complete()) {
-        log_write(LogLevel::Error, "hook targets were not resolved; refusing to hook");
+    if (!rt.symbols.any()) {
+        log_write(LogLevel::Error, "no hook targets could be resolved; refusing to hook");
         return false;
     }
+    if (!rt.symbols.complete()) {
+        /*
+         * Partial support is allowed and reported: each feature is gated on
+         * its own capability, so an unresolved target only disables the
+         * events that need it.  See PROJECT_RULES.md 1.3.
+         */
+        log_write(LogLevel::Warn, "partial hook coverage on this build; unresolved features stay disabled");
+    }
 
-    bool ok = install_one(g_try_hook, "tryToLoadPlayer", rt.symbols.try_to_load_player,
-                          reinterpret_cast<void*>(&try_to_load_player_detour),
-                          reinterpret_cast<void**>(&g_try_original));
-    if (!ok) {
+    /* At least one relationship hook must work, otherwise the runtime is
+     * useless and we prefer to leave the server untouched. */
+    const bool core = install_one(g_try_hook, "tryToLoadPlayer", rt.symbols.try_to_load_player,
+                                  reinterpret_cast<void*>(&try_to_load_player_detour),
+                                  reinterpret_cast<void**>(&g_try_original)) |
+                      install_one(g_join_hook, "SetLocalPlayerAsInitialized",
+                                  rt.symbols.set_local_player_initialized,
+                                  reinterpret_cast<void*>(&set_local_player_initialized_detour),
+                                  reinterpret_cast<void**>(&g_set_local_init_original));
+    if (!core) {
+        log_write(LogLevel::Error, "neither join nor pre_join could be hooked; refusing to patch further");
         return false;
     }
 
     install_one(g_disconnect_hook, "disconnectClientWithMessage", rt.symbols.disconnect_client,
                 reinterpret_cast<void*>(&disconnect_detour), reinterpret_cast<void**>(&g_disconnect_original));
-    install_one(g_join_hook, "SetLocalPlayerAsInitialized", rt.symbols.set_local_player_initialized,
-                reinterpret_cast<void*>(&set_local_player_initialized_detour),
-                reinterpret_cast<void**>(&g_set_local_init_original));
     install_one(g_chat_hook, "TextPacket", rt.symbols.text_packet,
                 reinterpret_cast<void*>(&text_packet_detour), reinterpret_cast<void**>(&g_text_packet_original));
     install_one(g_left_hook, "_onPlayerLeft", rt.symbols.player_left,

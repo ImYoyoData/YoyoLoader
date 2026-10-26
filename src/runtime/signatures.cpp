@@ -228,12 +228,24 @@ const char* kCreatePacket =
  * free.  The expected bytes come from the reference prologue so a relocated
  * target is still validated against real instruction bytes.
  */
-void fill_mask(const char* signature, ResolvedTarget& target) {
+void fill_mask(const char* signature, size_t known_length, ResolvedTarget& target) {
     Pattern pattern;
     if (!pattern_from_text(signature, pattern)) {
         return;
     }
-    const size_t limit = std::min<size_t>(pattern.bytes.size(), sizeof(target.patch_bytes));
+    /*
+     * Only mask bytes we actually know.  The reference prologue is the patch
+     * length and ends on an instruction boundary; the signature may be longer.
+     * Masking beyond the known bytes compares against zeros and makes the
+     * check fail forever.
+     */
+    size_t limit = pattern.bytes.size();
+    if (known_length < limit) {
+        limit = known_length;
+    }
+    if (sizeof(target.patch_bytes) < limit) {
+        limit = sizeof(target.patch_bytes);
+    }
     for (size_t i = 0; i < limit; ++i) {
         target.patch_mask[i] = pattern.bytes[i].wildcard ? 0 : 1;
     }
@@ -244,20 +256,21 @@ void fill_mask(const char* signature, ResolvedTarget& target) {
  * Fill expected bytes from the reference prologue (when this build has one),
  * falling back to the signature's literal bytes.
  */
-void fill_expected(const Prologue& prologue, const char* signature, ResolvedTarget& target) {
+size_t fill_expected(const Prologue& prologue, const char* signature, ResolvedTarget& target) {
     if (prologue.length != 0) {
         const size_t limit = std::min<size_t>(prologue.length, sizeof(target.patch_bytes));
         std::memcpy(target.patch_bytes, prologue.bytes, limit);
-        return;
+        return limit;
     }
     Pattern pattern;
     if (!pattern_from_text(signature, pattern)) {
-        return;
+        return 0;
     }
     const size_t limit = std::min<size_t>(pattern.bytes.size(), sizeof(target.patch_bytes));
     for (size_t i = 0; i < limit; ++i) {
         target.patch_bytes[i] = pattern.bytes[i].value;
     }
+    return limit;
 }
 
 bool prologue_matches(uintptr_t address, const ResolvedTarget& target) {
@@ -276,8 +289,8 @@ bool prologue_matches(uintptr_t address, const ResolvedTarget& target) {
 ResolvedTarget resolve_one(uintptr_t base, const Prologue& rva_spec, const char* signature, const char* name,
                            uint32_t rip_offset, uint32_t rip_length, ResolvedSymbols& out) {
     ResolvedTarget target;
-    fill_expected(rva_spec, signature, target);
-    fill_mask(signature, target);
+    const size_t known = fill_expected(rva_spec, signature, target);
+    fill_mask(signature, known, target);
     target.rip_offset = rip_offset;
     target.rip_instruction_length = rip_length;
 
@@ -398,11 +411,11 @@ ResolvedSymbols resolve_symbols(uintptr_t module_base, const VersionProfile* ref
 }
 
 std::string describe_resolution(const ResolvedSymbols& symbols) {
-    if (!symbols.complete()) {
-        return "incomplete symbol resolution";
+    if (!symbols.any()) {
+        return "no hook targets resolved";
     }
     if (symbols.recovered.empty()) {
-        return "all hook targets matched the exact profile";
+        return "all resolvable hook targets matched the exact profile";
     }
     std::string text = "recovered by signature:";
     for (const auto& name : symbols.recovered) {

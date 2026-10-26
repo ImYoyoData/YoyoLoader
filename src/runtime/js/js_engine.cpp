@@ -1,6 +1,7 @@
 #include "js_engine.h"
 
 #include "js_internal.h"
+#include "../capabilities.h"
 #include "../events.h"
 #include "../live.h"
 #include "../log.h"
@@ -50,6 +51,13 @@ void* player_handle(JSContext* ctx, JSValueConst object) {
 
 JSValue throw_no_live_player(JSContext* ctx) {
     return JS_ThrowInternalError(ctx, "this Player is not backed by a live ServerPlayer");
+}
+
+
+JSValue throw_capability(JSContext* ctx, const char* feature) {
+    return JS_ThrowInternalError(ctx,
+                                 "%s is not verified for this BDS build; see the startup capability report",
+                                 feature);
 }
 
 bool get_number_property(JSContext* ctx, JSValueConst object, const char* name, double& out) {
@@ -284,6 +292,7 @@ JSValue make_location(JSContext* ctx, const LiveVec3& position, int dimension, b
 }
 
 JSValue player_get_position(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "getPosition");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     LiveVec3 position;
@@ -296,6 +305,7 @@ JSValue player_get_position(JSContext* ctx, JSValueConst this_val, int, JSValueC
 }
 
 JSValue player_get_location(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "getLocation");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     LiveVec3 position;
@@ -308,6 +318,7 @@ JSValue player_get_location(JSContext* ctx, JSValueConst this_val, int, JSValueC
 }
 
 JSValue player_get_rotation(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_rotation)) return throw_capability(ctx, "getRotation");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     float pitch = 0.0f;
@@ -320,12 +331,14 @@ JSValue player_get_rotation(JSContext* ctx, JSValueConst this_val, int, JSValueC
 }
 
 JSValue player_get_dimension(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "getDimension");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewInt32(ctx, live_get_dimension(handle));
 }
 
 JSValue player_get_dimension_name(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_position)) return throw_capability(ctx, "getDimensionName");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewString(ctx, live_dimension_name(live_get_dimension(handle)));
@@ -336,6 +349,7 @@ JSValue player_get_runtime_id(JSContext* ctx, JSValueConst this_val, int, JSValu
 }
 
 JSValue player_get_game_mode(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_game_mode)) return throw_capability(ctx, "getGameMode");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewInt32(ctx, live_get_game_mode(handle));
@@ -349,6 +363,7 @@ JSValue player_get_game_mode_name(JSContext* ctx, JSValueConst this_val, int, JS
 
 JSValue player_set_game_mode(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "setGameMode(mode) requires an argument");
+    if (!capability_enabled(&VersionCapabilities::player_set_game_mode)) return throw_capability(ctx, "setGameMode");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     int32_t mode = 0;
@@ -366,6 +381,7 @@ JSValue player_set_game_mode(JSContext* ctx, JSValueConst this_val, int argc, JS
 }
 
 JSValue player_get_unique_id(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    if (!capability_enabled(&VersionCapabilities::player_identity)) return throw_capability(ctx, "getUniqueId");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     return JS_NewInt64(ctx, static_cast<int64_t>(live_unique_id(handle)));
@@ -403,6 +419,7 @@ JSValue player_get_health(JSContext* ctx, JSValueConst this_val, int, JSValueCon
 }
 
 JSValue player_teleport(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (!capability_enabled(&VersionCapabilities::player_teleport)) return throw_capability(ctx, "teleport");
     void* handle = player_handle(ctx, this_val);
     if (handle == nullptr) return throw_no_live_player(ctx);
     if (argc < 1) return JS_ThrowTypeError(ctx, "teleport(x, y, z[, dimension]) requires coordinates");

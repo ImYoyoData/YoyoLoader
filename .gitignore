@@ -25,3 +25,6 @@ __pycache__/
 *.pyc
 
 selftest/
+
+_bds/
+_bot2/

@@ -1,5 +1,6 @@
 #include "live.h"
 
+#include "capabilities.h"
 #include "hooks.h"
 #include "log.h"
 #include "native_string.h"
@@ -574,6 +575,10 @@ bool live_actor_valid(void* actor) {
 }
 
 bool live_teleport(void* actor, const LiveVec3& position, int dimension) {
+    if (!capability_enabled(&VersionCapabilities::player_teleport)) {
+        log_write(LogLevel::Warn, "teleport is not verified for this build");
+        return false;
+    }
     const auto* live = profile();
     if (live == nullptr || !live_actor_valid(actor) || live->teleport_slot == 0) {
         return false;
@@ -703,6 +708,10 @@ int live_get_game_mode(void* actor) {
 }
 
 bool live_set_game_mode(void* actor, int mode) {
+    if (!capability_enabled(&VersionCapabilities::player_set_game_mode)) {
+        log_write(LogLevel::Warn, "setGameMode is not verified for this build");
+        return false;
+    }
     const auto* live = profile();
     if (live == nullptr || actor == nullptr || live->set_game_mode_slot == 0) {
         return false;

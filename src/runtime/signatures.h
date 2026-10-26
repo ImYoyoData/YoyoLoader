@@ -63,6 +63,13 @@ struct ResolvedSymbols {
                set_local_player_initialized.valid() && text_packet.valid() && player_left.valid() &&
                level_tick.valid() && create_packet.valid();
     }
+
+    /* True when at least one target resolved; partial support is allowed. */
+    bool any() const {
+        return try_to_load_player.valid() || disconnect_client.valid() ||
+               set_local_player_initialized.valid() || text_packet.valid() || player_left.valid() ||
+               level_tick.valid() || create_packet.valid();
+    }
 };
 
 struct SignatureEntry {
@@ -96,5 +103,41 @@ uintptr_t find_signature(uintptr_t module_base, const char* pattern);
 size_t count_signature_matches(const uint8_t* data, size_t size, const char* pattern, size_t* out_offset);
 
 std::string describe_resolution(const ResolvedSymbols& symbols);
+
+/*
+ * Structural probes.
+ *
+ * Entry-byte signatures break whenever the compiler changes its stack-frame
+ * template -- which is exactly what happened between 1.26.52.3 and 1.26.70.21.
+ * A structural probe instead looks for something *inside* the function that
+ * carries meaning:
+ *
+ *   - a unique literal (assertion / log text) and the function referencing it;
+ *   - a short instruction idiom that encodes the function's job, such as the
+ *     TextPacket handler's `lea rcx,[rcx-0x10]` followed by the payload type
+ *     check `cmp byte [r8+0x98], 1`.
+ *
+ * Each probe must match exactly one function.  An ambiguous probe disables its
+ * target rather than guessing.
+ */
+enum class ProbeKind {
+    /* `literal` is NUL-terminated text; resolve the function that loads it. */
+    UniqueString,
+    /* `pattern` is instruction bytes inside the function. */
+    InstructionShape,
+};
+
+struct StructuralProbe {
+    const char* name;
+    ProbeKind kind;
+    const char* pattern;
+    /* InstructionShape: allowed distance from match to function entry. */
+    uint32_t min_leading = 0;
+    uint32_t max_leading = 0xFFFFFFFFu;
+};
+
+const StructuralProbe* structural_probes(size_t& count);
+
+uintptr_t resolve_structural_probe(uintptr_t module_base, const StructuralProbe& probe);
 
 } // namespace yoyo
