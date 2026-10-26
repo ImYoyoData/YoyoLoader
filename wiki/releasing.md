@@ -233,6 +233,23 @@ Quit correctly
 GitHub runner 上 `clang` 的主版本可能比开发环境新，新警告会改变构建行为。
 CI 现在显式安装并切换到 `clang-14` / `lld-14`，与本地验证环境一致。
 
+### Windows 产物校验脚本崩溃（已修复）
+
+第一版校验用了 `[System.IO.Compression.ZipFile]::OpenRead`，在某些 PowerShell
+环境下该类型未加载，报 `找不到类型 [System.IO.Compression.ZipFile]`。
+改为 `Expand-Archive` 到临时目录后用 `Test-Path` 逐项检查，稳定可靠。
+
+### Linux 校验脚本的空白问题（已修复）
+
+用多行缩进字符串定义必需文件列表时，YAML 会把缩进写进 shell 变量，
+导致 `grep -qx` 匹配不到任何文件。现在列表从行首开始，逐行遍历。
+
+### 必须在 CI 里打印构建输出（已修复）
+
+Linux 构建曾在没有任何编译器错误的情况下失败，因为脚本自身没跑起来。
+现在 CI 用 `bash -x` 并把最后 120 行输出留在日志里，`exit ${PIPESTATUS[0]}`
+保留真实退出码。
+
 ### 构建失败时看不到原因（已修复）
 
 `build_linux.sh` 现在会在关键命令失败时打印 `runtime build FAILED` 并立即退出，
@@ -248,6 +265,8 @@ CI 也用 `bash -x` 输出完整命令轨迹。
 | `build-windows` | ✅ Build / Package / Verify / Upload |
 | `build-linux` | ✅ Build / Package / Verify / Upload |
 | `release` | ⏭ 跳过（非 tag / 未填版本） |
+
+对应运行：Actions run `40373138583`（`dev` 分支）。
 
 ### 产物内容校验
 
@@ -278,8 +297,10 @@ from pathlib import Path
 for p in Path('scripts').glob('*.sh'):
     b = p.read_bytes()
     if b'
+
 ' in b:
         p.write_bytes(b.replace(b'
+
 ', b'
 '))
         print('fixed', p)
