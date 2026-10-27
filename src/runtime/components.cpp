@@ -1,6 +1,12 @@
 #include "components.h"
 
 #include "live.h"
+#include "runtime.h"
+
+#include <cstdint>
+#include <cstring>
+
+#include "live.h"
 #include "log.h"
 #include "runtime.h"
 

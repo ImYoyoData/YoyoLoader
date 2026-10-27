@@ -738,7 +738,7 @@ JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int argc, JSValueCon
      * down: the dispatcher ends up owning state we cannot reproduce from
      * outside the engine.  Until that is solved properly, refuse instead of
      * crashing the process.  Player-facing commands are handled by
-     * intercepting "/" chat in plugins (see plugins/*.js).
+     * intercepting "/" chat in plugins (see the plugin examples).
      */
     /*
      * Measured on 1.26.52.3: the dispatcher returns normally, then the server

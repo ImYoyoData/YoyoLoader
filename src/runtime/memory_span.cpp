@@ -60,20 +60,23 @@ struct Region {
     uintptr_t end;
 };
 
+/* One shared region table: load_regions() fills it and range_state() reads it,
+ * so it has to live outside both. */
+Region g_regions[4096];
+size_t g_region_count = 0;
+bool g_regions_loaded = false;
+
 bool load_regions() {
-    static Region regions[4096];
-    static size_t count = 0;
-    static bool loaded = false;
-    if (loaded) {
-        return count != 0;
+    if (g_regions_loaded) {
+        return g_region_count != 0;
     }
-    loaded = true;
+    g_regions_loaded = true;
     std::FILE* file = std::fopen("/proc/self/maps", "r");
     if (file == nullptr) {
         return false;
     }
     char line[512];
-    while (std::fgets(line, sizeof(line), file) != nullptr && count < 4096) {
+    while (std::fgets(line, sizeof(line), file) != nullptr && g_region_count < 4096) {
         unsigned long long begin = 0;
         unsigned long long end = 0;
         char perms[8] = {};
@@ -83,12 +86,12 @@ bool load_regions() {
         if (perms[0] != 'r') {
             continue;
         }
-        regions[count].begin = static_cast<uintptr_t>(begin);
-        regions[count].end = static_cast<uintptr_t>(end);
-        ++count;
+        g_regions[g_region_count].begin = static_cast<uintptr_t>(begin);
+        g_regions[g_region_count].end = static_cast<uintptr_t>(end);
+        ++g_region_count;
     }
     std::fclose(file);
-    return count != 0;
+    return g_region_count != 0;
 }
 
 bool range_state(const void* address, size_t size, size_t& readable) {
@@ -100,11 +103,11 @@ bool range_state(const void* address, size_t size, size_t& readable) {
     auto remaining = size;
     /* Regions are collected in file order, which /proc/self/maps emits sorted
      * by address, so a linear walk is fine for the small count we keep. */
-    for (size_t i = 0; i < 4096 && remaining > 0; ++i) {
-        if (current < regions[i].begin || current >= regions[i].end) {
+    for (size_t i = 0; i < g_region_count && remaining > 0; ++i) {
+        if (current < g_regions[i].begin || current >= g_regions[i].end) {
             continue;
         }
-        const size_t available = regions[i].end - current;
+        const size_t available = g_regions[i].end - current;
         const size_t take = available < remaining ? available : remaining;
         readable += take;
         current += take;
