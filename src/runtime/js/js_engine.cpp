@@ -1448,20 +1448,23 @@ JSValue player_container_view(JSContext* ctx, JSValueConst this_val, int argc, J
     ContainerSnapshot snapshot;
     if (!inventory_cache_get(window_id, snapshot)) {
         if (window_id != 0) {
-            const char* what = window_id == 120   ? "armor"
-                               : window_id == 119 ? "offhand"
-                               : window_id == -1  ? "ender chest"
-                                                  : "container";
+            const char* what = window_id == 120   ? "getArmor()"
+                               : window_id == 119 ? "getOffhand()"
+                               : window_id == -1  ? "getEnderChest()"
+                                                  : "getContainer()";
             return JS_ThrowInternalError(
                 ctx,
-                "the %s container is not exposed by this build: its component layout is not "
-                "verified here and no InventoryContent packet has been observed yet",
+                "pl.%s is unavailable: the player inventory is not an EnTT component "
+                "(ContainerComponent belongs to block entities only), so there is no verified "
+                "native path on this build. See docs/NATIVE_ACCESS.md",
                 what);
         }
         return JS_ThrowInternalError(
             ctx,
-            "this inventory has not been observed yet: the native container layout is not "
-            "verified for this build and no InventoryContent packet has arrived");
+            "pl.getInventory() is unavailable on this build: the player inventory is not an EnTT "
+            "component (ContainerComponent belongs to block entities only) and its packet payload "
+            "offset is not located, so there is no verified native path. See "
+            "docs/NATIVE_ACCESS.md");
     }
 
     JSValue container = JS_NewObject(ctx);
