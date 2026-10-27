@@ -1,6 +1,7 @@
 #include "packet_events.h"
 
 #include "client_commands.h"
+#include "inventory.h"
 #include "events.h"
 #include "hook_engine.h"
 #include "js/js_engine.h"
@@ -39,6 +40,8 @@ constexpr int kPacketContainerOpen = 46;
 constexpr int kPacketContainerClose = 47;
 constexpr int kPacketCommandRequest = 77;
 constexpr int kPacketAvailableCommands = 76;
+constexpr int kPacketInventoryContent = 49;
+constexpr int kPacketInventorySlot = 50;
 constexpr int kPacketPlayerSkin = 93;
 constexpr int kPacketModalFormResponse = 101;
 constexpr int kPacketEmote = 138;

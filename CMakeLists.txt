@@ -30,6 +30,8 @@ set(YOYO_RUNTIME_SOURCES
     src/runtime/hooks.cpp
     src/runtime/live.cpp
     src/runtime/client_commands.cpp
+    src/runtime/inventory.cpp
+    src/runtime/script_bridge.cpp
     src/runtime/packet_events.cpp
     src/runtime/worlds.cpp
     src/runtime/events.cpp

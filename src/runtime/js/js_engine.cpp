@@ -3,6 +3,7 @@
 #include "js_internal.h"
 #include "../capabilities.h"
 #include "../events.h"
+#include "../inventory.h"
 #include "../live.h"
 #include "../log.h"
 #include "../native_string.h"
@@ -1270,6 +1271,147 @@ JSValue player_runcmd_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
         ctx, "runcmd is not implemented by YoyoLoader yet (see docs/API_COVERAGE.md)");
 }
 
+/* Build a JS Item from a cached stack. */
+JSValue item_from_stack(JSContext* ctx, const ItemStackView& stack) {
+    if (stack.empty()) {
+        return JS_NULL;
+    }
+    const std::string name =
+        stack.type_name.empty() ? inventory_name_for(stack.network_id) : stack.type_name;
+    JSValue item = make_item_object(ctx, name, stack.count, stack.metadata);
+    JS_SetPropertyStr(ctx, item, "id", JS_NewInt32(ctx, stack.network_id));
+    JS_SetPropertyStr(ctx, item, "networkId", JS_NewInt32(ctx, stack.network_id));
+    if (stack.has_nbt && !stack.nbt.empty()) {
+        JS_SetPropertyStr(ctx, item, "nbtRaw",
+                          JS_NewStringLen(ctx, reinterpret_cast<const char*>(stack.nbt.data()),
+                                          stack.nbt.size()));
+    }
+    return item;
+}
+
+/*
+ * pl.getInventory() -> Container backed by the cached InventoryContentPacket.
+ *
+ * The object exposes the LLSE Container surface: size, type, getItem,
+ * getAllItems, isEmpty.  Values come from packets the server already sent, so
+ * they are the real contents the client is showing.
+ */
+JSValue player_container_view(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv,
+                              int32_t window_id) {
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+    (void)argc;
+    (void)argv;
+
+    ContainerSnapshot snapshot;
+    if (!inventory_cache_get(window_id, snapshot)) {
+        return JS_ThrowInternalError(
+            ctx,
+            "this inventory has not been observed yet; it is read from InventoryContent packets, "
+            "so wait until the server sends one");
+    }
+
+    JSValue container = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, container, "size",
+                      JS_NewInt32(ctx, static_cast<int32_t>(snapshot.slots.size())));
+    const char* type_name = window_id == 120   ? "armor"
+                            : window_id == 119 ? "offhand"
+                            : window_id == 0   ? "inventory"
+                                               : "container";
+    JS_SetPropertyStr(ctx, container, "type", JS_NewString(ctx, type_name));
+
+    JSValue items = JS_NewArray(ctx);
+    for (size_t i = 0; i < snapshot.slots.size(); ++i) {
+        JS_SetPropertyUint32(ctx, items, static_cast<uint32_t>(i),
+                             item_from_stack(ctx, snapshot.slots[i]));
+    }
+    JS_SetPropertyStr(ctx, container, "items", items);
+
+    JS_SetPropertyStr(ctx, container, "getSize",
+                      JS_NewCFunction(ctx,
+                                      [](JSContext* c, JSValueConst self, int, JSValueConst*) {
+                                          return JS_GetPropertyStr(c, self, "size");
+                                      },
+                                      "getSize", 0));
+    JS_SetPropertyStr(ctx, container, "getItem",
+                      JS_NewCFunction(ctx,
+                                      [](JSContext* c, JSValueConst self, int ac,
+                                         JSValueConst* av) -> JSValue {
+                                          int32_t index = 0;
+                                          if (ac < 1 || JS_ToInt32(c, &index, av[0]) < 0) return JS_NULL;
+                                          JSValue list = JS_GetPropertyStr(c, self, "items");
+                                          JSValue v =
+                                              JS_GetPropertyUint32(c, list, static_cast<uint32_t>(index));
+                                          JS_FreeValue(c, list);
+                                          return v;
+                                      },
+                                      "getItem", 1));
+    JS_SetPropertyStr(ctx, container, "getAllItems",
+                      JS_NewCFunction(ctx,
+                                      [](JSContext* c, JSValueConst self, int, JSValueConst*) {
+                                          return JS_GetPropertyStr(c, self, "items");
+                                      },
+                                      "getAllItems", 0));
+    JS_SetPropertyStr(ctx, container, "isEmpty",
+                      JS_NewCFunction(ctx,
+                                      [](JSContext* c, JSValueConst self, int,
+                                         JSValueConst*) -> JSValue {
+                                          JSValue list = JS_GetPropertyStr(c, self, "items");
+                                          JSValue len = JS_GetPropertyStr(c, list, "length");
+                                          int32_t n = 0;
+                                          JS_ToInt32(c, &n, len);
+                                          JS_FreeValue(c, len);
+                                          JS_FreeValue(c, list);
+                                          return JS_NewBool(c, n == 0);
+                                      },
+                                      "isEmpty", 0));
+    return container;
+}
+
+JSValue player_get_inventory(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return player_container_view(ctx, this_val, argc, argv, 0);
+}
+
+JSValue player_get_armor(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return player_container_view(ctx, this_val, argc, argv, 120);
+}
+
+JSValue player_get_ender_chest(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return player_container_view(ctx, this_val, argc, argv, -1);
+}
+
+JSValue player_get_offhand(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return player_container_view(ctx, this_val, argc, argv, 119);
+}
+
+JSValue player_give_item(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 1 || !JS_IsObject(argv[0])) {
+        return JS_ThrowTypeError(ctx, "giveItem(item) requires an Item");
+    }
+    void* handle = player_handle(ctx, this_val);
+    if (handle == nullptr) return throw_no_live_player(ctx);
+
+    int32_t network_id = 0;
+    int32_t count = 1;
+    int32_t metadata = 0;
+    JSValue idv = JS_GetPropertyStr(ctx, argv[0], "id");
+    JSValue cnt = JS_GetPropertyStr(ctx, argv[0], "count");
+    JSValue aux = JS_GetPropertyStr(ctx, argv[0], "aux");
+    JS_ToInt32(ctx, &network_id, idv);
+    JS_ToInt32(ctx, &count, cnt);
+    JS_ToInt32(ctx, &metadata, aux);
+    JS_FreeValue(ctx, idv);
+    JS_FreeValue(ctx, cnt);
+    JS_FreeValue(ctx, aux);
+
+    if (network_id == 0) {
+        return JS_ThrowTypeError(
+            ctx, "giveItem needs an item with a numeric id; mc.newItem() alone has no server id");
+    }
+    return JS_NewBool(ctx, inventory_give_item(handle, static_cast<int16_t>(network_id),
+                                               static_cast<uint16_t>(count), metadata));
+}
+
 /*
  * Inventory access needs the live Container/ItemStack ABI, which is one of the
  * most version-fragile parts of BDS.  Until that is reverse engineered per
@@ -1406,13 +1548,13 @@ JSValue make_player(JSContext* ctx, const PlayerView& player) {
     JS_SetPropertyStr(ctx, object, "runcmd", JS_NewCFunction(ctx, player_runcmd_stub, "runcmd", 1));
     JS_SetPropertyStr(ctx, object, "isSneaking_llse", JS_NewCFunction(ctx, player_is_sneaking, "isSneaking", 0));
     JS_SetPropertyStr(ctx, object, "giveItem",
-                      JS_NewCFunction(ctx, player_inventory_stub, "giveItem", 2));
+                      JS_NewCFunction(ctx, player_give_item, "giveItem", 2));
     JS_SetPropertyStr(ctx, object, "getInventory",
-                      JS_NewCFunction(ctx, player_inventory_stub, "getInventory", 0));
+                      JS_NewCFunction(ctx, player_get_inventory, "getInventory", 0));
     JS_SetPropertyStr(ctx, object, "getArmor",
-                      JS_NewCFunction(ctx, player_inventory_stub, "getArmor", 0));
+                      JS_NewCFunction(ctx, player_get_armor, "getArmor", 0));
     JS_SetPropertyStr(ctx, object, "getEnderChest",
-                      JS_NewCFunction(ctx, player_inventory_stub, "getEnderChest", 0));
+                      JS_NewCFunction(ctx, player_get_ender_chest, "getEnderChest", 0));
     JS_SetPropertyStr(ctx, object, "getNbt",
                       JS_NewCFunction(ctx, player_nbt_stub, "getNbt", 0));
     JS_SetPropertyStr(ctx, object, "setNbt",

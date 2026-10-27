@@ -6,6 +6,7 @@
 #include "log.h"
 #include "packet_events.h"
 #include "plugin_loader.h"
+#include "script_bridge.h"
 #include "worlds.h"
 
 namespace yoyo {
@@ -63,6 +64,15 @@ void runtime_start() {
     }
     if (!install_packet_hooks()) {
         log_write(LogLevel::Warn, "packet detail events are unavailable for this build");
+    }
+
+    /*
+     * Deploy the official Script API bridge before the world loads: BDS reads
+     * behaviour packs during startup, so the pack must exist by then.
+     */
+    const auto bridge = script_bridge_install(g_state.module.base != 0 ? "." : ".");
+    if (!bridge.available) {
+        log_write(LogLevel::Warn, "script bridge unavailable: %s", bridge.reason.c_str());
     }
 
     worlds::initialize();
