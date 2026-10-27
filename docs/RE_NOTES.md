@@ -371,3 +371,145 @@ RVA 表是“已知版本”的快路径，不是唯一入口。`src/runtime/sig
   `TransferPacket` 用于客户端切换。
 - 多世界命令只在主世界 controller 上执行 load/unload；所有命令用
   `yoyo_ops.txt` 做 XUID 白名单。
+
+---
+
+# 11. 原生对象访问（STL / EnTT）——本轮逆向结论
+
+本轮目标：按 LeviLamina 的方式直接读 BDS 对象，跨 Windows(MSVC) 与 Linux(libc++) 两套 ABI。
+以下每一条都在真实二进制与真实运行中的服务器上验证过，未验证的一律标注。
+
+## 11.1 组件类型哈希 = FNV-1a/32(类型名)
+
+**这是本轮最重要的发现。** 组件的 32 位 EnTT 类型 id 不是任意常量，而是组件 C++ 类型名的
+FNV-1a/32 哈希：
+
+```
+h = 2166136261
+for each byte b of "RuntimeIDComponent":
+    h ^= b
+    h *= 16777619      (mod 2^32)
+```
+
+验证方式（不是推测）：
+
+1. 对 5 个已知哈希逐一计算，全部精确命中：
+   - `RuntimeIDComponent` → `0xFC0DBBB5`
+   - `ActorUniqueIDComponent` → `0x18F957AF`
+   - `DimensionTypeComponent` → `0xAF993816`
+   - `UserEntityIdentifierComponent` → `0x0B845379`
+   - `ActorGameTypeComponent` → `0x88D3EDDF`（注意：不是 `GameTypeComponent`）
+2. 从 1.26.52.3 Windows 二进制导出全部池条目（实体注册表实时遍历），得到 467 个活着的
+   组件哈希；从二进制里抓出 1381 个 `*Component` 类型名做 FNV 比对，**433 个精确匹配**。
+3. 同一批哈希在 1.26.70.21 Windows 与 Linux 二进制里同样存在。
+
+结论：新增组件不需要扫描二进制，知道类名即可算出 id。这是 `components.h::component_hash()`。
+
+## 11.2 EnTT 组件查找路径（两平台一致）
+
+组件不是"指针数组"，而是**内联存进 dense page**：
+
+```
+registry = actor[+0x10]
+entity   = actor[+0x18]              (32 位：低 18 位索引，高 14 位版本)
+begin    = registry[+0x48]           (Windows) / [+0x38] (Linux 1.26.52.3)
+end      = registry[+0x50]           / [+0x40]
+entries  = registry[+0x68]           / [+0x50]
+entries_end = registry[+0x70]        / [+0x58]     ← 必需，见下
+
+bucket = begin[(count-1) & hash]
+entry  = entries + bucket_value*32
+pool   = entry[+0x10]
+
+sparse_page = pool[+8][(entity & 0x3FFFF) >> 11]
+item        = sparse_page[(entity & 0x7FF) * 4]
+校验: (item ^ (entity & 0xFFFC0000)) <= 0x3FFFE
+
+dense_pages = pool[+0x50]
+page        = dense_pages[(item & 0x3FF80) >> 4]
+component   = page + (item & 0x7F) * sizeof(ComponentType)
+```
+
+**踩过的坑（已修）**：`bucket_value` 是 entries 数组的下标，早期实现直接用
+`entries + value*32` 而不校验上界。某些哈希走的探测链上会有脏 bucket，于是变成野读并崩溃。
+现在先用 `entries_end` 算出容量，`value >= capacity` 直接当未命中返回。
+
+## 11.3 ContainerComponent / ItemStack 布局
+
+反汇编 `0x140a3eeb2`（Windows 1.26.52.3 / 70.21 同一份代码）确认：
+
+| 项 | Windows | Linux |
+|---|---|---|
+| `ContainerComponent` 大小 | `0x200` | `0x1a0` |
+| 槽位 `std::vector<ItemStack>` 偏移 | `+0x1a8` | `+0x150` |
+| `Container*`（虚表对象）偏移 | `+0x10` | `+0x10` |
+| `ItemStack` 大小 | `0x98` | `0x98` |
+
+`ItemStack` 内部（两平台一致，由拷贝构造 `0x1424c3ce0` 与 `setItem` `0x1424c8b90` 确认）：
+
+| 偏移 | 类型 | 含义 |
+|---|---|---|
+| `+0x08` | 指针 | `Item*`（两级间接后可读 id） |
+| `+0x18` | 指针 | user-data / net-id 持有者 |
+| `+0x20` | uint16 | aux value（`0x7FFF` = 未设置） |
+| `+0x22` | uint8 | 数量 |
+| `+0x23` | uint8 | 有效标志（1 = 有物品） |
+| `+0x78` | 指针 | NBT user data |
+
+`std::vector` 在三处 ABI 上都是 **3 个指针**（begin/end/capacity），所以一个读取器通用；
+`std::string` 不是（MSVC 32 字节，libc++ 24 字节），走 `native_string.{h,cpp}`。
+
+## 11.4 关键负面结论：玩家背包不是 EnTT 组件
+
+在 1.26.52.3 上用真实玩家（entity id = 1）实测：
+
+- `RuntimeIDComponent`、`ActorUniqueIDComponent`、`PlayerComponent`、`ServerPlayerComponent`、
+  `UserEntityIdentifierComponent`、`EquippableComponent`、`ActorTypeComponent`、
+  `StateVectorComponent`、`AttributesComponent` 全部 **PRESENT**；
+- `ContainerComponent` **不在任何已注册的池里**（遍历 458 个活池，无 `0x1779E2C7`）；
+- `ActorEquipmentComponent`、`ActorGameModeComponent` 同样不在池里。
+
+即：`ContainerComponent` 是**方块实体容器**（箱子/漏斗等）用的，**玩家背包不通过它**。
+玩家背包位于 `PlayerInventory`（`SimplePlayerContainer` 等），是 `ServerPlayer` 的成员对象，
+不是 ECS 组件。该对象的字段偏移尚未确定。
+
+**因此：`getInventory`/`getArmor`/`getEnderChest` 不能靠组件路径实现。**
+把 `ContainerComponent` 当成玩家背包去读，会读到完全不相关的数据——这比"功能缺失"更糟。
+
+## 11.5 数据包路径（InventoryContent / InventorySlot）
+
+协议定义（取自 `minecraft-data` 1.26.51 的 `protocol.json`，非猜测）：
+
+```
+inventory_content:  window_id(WindowIDVarint)  ItemV4s
+inventory_slot:     window_id  slot(varint)  [FullContainerName]  [ItemV4]  ItemV4
+ItemV4:             li16 network_id, lu16 count, varint metadata,
+                    bool has_stack_id, [zigzag32 stack_id],
+                    varint block_runtime_id, encapsulated extra
+ItemV4s:            varint count + count * ItemV4
+```
+
+解析器 `inventory.cpp` 已按此实现，并有完整的边界检查（`Reader`）。
+
+**但它读不到正确的 payload 起点。** 对真实服务器抓包实测：
+
+- 以 `kPacketBaseSize = 48` 为起点，解出的 window id 恰好是 120/124/119 等合法值，
+  但随后的 count 与内容明显不是 ItemStack（是相邻的 ASCII/UUID 数据）；
+- 对 0..128 的每个起点尝试解析，并**要求槽位数严格等于该窗口的规定值**
+  （背包 36、盔甲 4、副手 1），结果**没有任何一个起点通过**。
+
+结论：这些包对象的 payload 并不从固定偏移开始，且我尚未定位到真正的 payload 成员。
+因此当前不启用数据包解析结果做背包读取（解析器代码保留，等定位到真实偏移再接）。
+
+## 11.6 由此确定的能力边界
+
+| 能力 | 结论 | 依据 |
+|---|---|---|
+| 读组件（生命/位置/维度/身份/游戏模式/属性） | 可用 | 11.1 + 11.2，已在真实玩家上验证 |
+| 读方块实体容器（箱子等） | 可用 | 11.3，组件存在且布局已验证 |
+| 读玩家背包 | **不可用**（原生） | 11.4 |
+| 读玩家背包（脚本桥） | 可用，需 `@minecraft/server` | 真实服务器实测 `inv=36` |
+| 动态内容注册新物品/生物/材质/合成表 | **运行时不可行** | 只能靠行为包，见 `dynamic_content.h` |
+
+原生栈保持"只做已验证的事"：组件读、方块容器读。玩家背包与动态内容走独立模块
+（`dynamic_content` / Script API 桥），两者代码与能力报告互不交叉。

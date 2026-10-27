@@ -307,10 +307,15 @@ bool send_set_title(void* player, int title_type, std::string_view text, int fad
     return send_network_packet(player, packet.get());
 }
 
+} // namespace
+
 /*
  * EnTT component lookup.  BDS stores components inline in dense pages, so
  * the returned pointer is page + index * component_size (not a pointer
  * loaded from the page).
+ *
+ * Kept outside the anonymous namespace because the native component layer
+ * (components.cpp) resolves components by type name through the same path.
  */
 void* entt_try_get(void* actor, uint32_t type_hash, size_t component_size) {
     const auto* live = profile();
@@ -332,11 +337,35 @@ void* entt_try_get(void* actor, uint32_t type_hash, size_t component_size) {
     if (count == 0) {
         return nullptr;
     }
+    /*
+     * The bucket holds an index into the pool-entry array, so it has to be
+     * bounded before it is dereferenced.  Without the bound a stale or
+     * differently-laid-out registry turns a lookup miss into a wild read.
+     */
+    if (live->entt_entries_end == 0) {
+        /* Without a verified end pointer an index from the bucket cannot be
+         * validated, so component lookup is refused rather than risking a
+         * wild read.  Every profile records this field. */
+        return nullptr;
+    }
+    auto* entries_end = *reinterpret_cast<unsigned char**>(registry + live->entt_entries_end);
+    if (entries_end == nullptr || entries_end <= entries) {
+        return nullptr;
+    }
+    const size_t entry_capacity = static_cast<size_t>(entries_end - entries) / 32;
+    if (entry_capacity == 0) {
+        return nullptr;
+    }
     size_t probe = (count - 1) & type_hash;
     for (size_t attempt = 0; attempt < count; ++attempt) {
         auto* bucket = reinterpret_cast<uint64_t*>(begin + probe * sizeof(void*));
         const uint64_t value = *bucket;
         if (value == UINT64_MAX) {
+            return nullptr;
+        }
+        if (value >= entry_capacity) {
+            /* Corrupt or stale bucket: treat it as a miss rather than reading
+             * an entry outside the array. */
             return nullptr;
         }
         auto* entry = entries + (value << 5);
@@ -348,16 +377,22 @@ void* entt_try_get(void* actor, uint32_t type_hash, size_t component_size) {
             const uint32_t sparse_page_index = (entity & 0x3FFFFu) >> 11;
             auto** sparse_pages = *reinterpret_cast<void***>(pool + 8);
             auto* sparse_end = *reinterpret_cast<unsigned char**>(pool + 0x10);
-            if (sparse_pages == nullptr) {
+            if (!plausible_pointer(sparse_pages)) {
+                return nullptr;
+            }
+            if (sparse_end != nullptr && !plausible_pointer(sparse_end)) {
+                return nullptr;
+            }
+            if (sparse_end == nullptr) {
                 return nullptr;
             }
             const size_t sparse_count =
-                sparse_end == nullptr ? 0 : (sparse_end - reinterpret_cast<unsigned char*>(sparse_pages)) / 8;
-            if (sparse_page_index >= sparse_count) {
+                (sparse_end - reinterpret_cast<unsigned char*>(sparse_pages)) / 8;
+            if (sparse_count == 0 || sparse_page_index >= sparse_count) {
                 return nullptr;
             }
             auto* sparse_page = static_cast<unsigned char*>(sparse_pages[sparse_page_index]);
-            if (sparse_page == nullptr) {
+            if (!plausible_pointer(sparse_page)) {
                 return nullptr;
             }
             const uint32_t item = *reinterpret_cast<uint32_t*>(sparse_page + (entity & 0x7FFu) * sizeof(uint32_t));
@@ -368,21 +403,23 @@ void* entt_try_get(void* actor, uint32_t type_hash, size_t component_size) {
              * page-pointer table. */
             const uint32_t dense_byte_offset = (item & 0x3FF80u) >> 4;
             auto* dense_pages = *reinterpret_cast<unsigned char**>(pool + 0x50);
-            if (dense_pages == nullptr) {
+            if (!plausible_pointer(dense_pages)) {
                 return nullptr;
             }
             auto* dense_page = *reinterpret_cast<unsigned char**>(dense_pages + dense_byte_offset);
-            if (dense_page == nullptr) {
+            if (!plausible_pointer(dense_page)) {
                 return nullptr;
             }
-            return dense_page + (item & 0x7Fu) * component_size;
+            auto* result = dense_page + (item & 0x7Fu) * component_size;
+            if (!plausible_pointer(result)) {
+                return nullptr;
+            }
+            return result;
         }
         probe = (probe + 1) % count;
     }
     return nullptr;
 }
-
-} // namespace
 
 void live_set_server_handler(void* handler) {
     g_server_handler = handler;

@@ -5,6 +5,8 @@
 #include "../events.h"
 #include "../inventory.h"
 #include "../live.h"
+#include "../bridge_state.h"
+#include "../native_inventory.h"
 #include "../log.h"
 #include "../native_string.h"
 #include "../packet_events.h"
@@ -1268,7 +1270,10 @@ JSValue player_is_op(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) 
 /* LLSE: pl.runcmd(cmd) is not implemented; fail loudly instead of silently. */
 JSValue player_runcmd_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return JS_ThrowInternalError(
-        ctx, "runcmd is not implemented by YoyoLoader yet (see docs/API_COVERAGE.md)");
+        ctx,
+        "pl.runcmd is unavailable: running a command as a player needs BDS's CommandOrigin, whose "
+        "layout is not verified for this build. mc.runcmd() and console commands work "
+        "(see docs/API_COVERAGE.md)");
 }
 
 /* Build a JS Item from a cached stack. */
@@ -1296,6 +1301,81 @@ JSValue item_from_stack(JSContext* ctx, const ItemStackView& stack) {
  * getAllItems, isEmpty.  Values come from packets the server already sent, so
  * they are the real contents the client is showing.
  */
+/*
+ * Convert a live ItemStack into the JS Item object plugins expect.
+ *
+ * The item id is BDS's numeric runtime id; the name is filled in when the
+ * bridge or a packet told us the mapping, otherwise the numeric id is kept so
+ * plugins can still act on the stack instead of losing it.
+ */
+JSValue item_from_live_stack(JSContext* ctx, const LiveItemStack& stack) {
+    if (!stack.present || stack.count == 0) {
+        return JS_NULL;
+    }
+    std::string name = native_item_name(stack.item_id);
+    if (name.empty()) {
+        name = inventory_name_for(stack.item_id);
+    }
+    if (name.empty()) {
+        name = "minecraft:item." + std::to_string(stack.item_id);
+    }
+    JSValue item = make_item_object(ctx, name, stack.count, stack.aux);
+    JS_SetPropertyStr(ctx, item, "id", JS_NewInt32(ctx, stack.item_id));
+    JS_SetPropertyStr(ctx, item, "networkId", JS_NewInt32(ctx, stack.item_id));
+    return item;
+}
+
+/* Build the LLSE Container object from an already-read slot array. */
+JSValue container_from_slots(JSContext* ctx, const char* type_name, const std::vector<JSValue>& slots) {
+    JSValue container = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, container, "size", JS_NewInt32(ctx, static_cast<int32_t>(slots.size())));
+    JS_SetPropertyStr(ctx, container, "type", JS_NewString(ctx, type_name));
+    JSValue items = JS_NewArray(ctx);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        JS_SetPropertyUint32(ctx, items, static_cast<uint32_t>(i), slots[i]);
+    }
+    JS_SetPropertyStr(ctx, container, "items", items);
+    JS_SetPropertyStr(ctx, container, "getSize",
+                      JS_NewCFunction(ctx,
+                                      [](JSContext* c, JSValueConst self, int, JSValueConst*) {
+                                          return JS_GetPropertyStr(c, self, "size");
+                                      },
+                                      "getSize", 0));
+    JS_SetPropertyStr(ctx, container, "getItem",
+                      JS_NewCFunction(ctx,
+                                      [](JSContext* c, JSValueConst self, int ac,
+                                         JSValueConst* av) -> JSValue {
+                                          int32_t index = 0;
+                                          if (ac < 1 || JS_ToInt32(c, &index, av[0]) < 0) return JS_NULL;
+                                          JSValue list = JS_GetPropertyStr(c, self, "items");
+                                          JSValue v =
+                                              JS_GetPropertyUint32(c, list, static_cast<uint32_t>(index));
+                                          JS_FreeValue(c, list);
+                                          return v;
+                                      },
+                                      "getItem", 1));
+    JS_SetPropertyStr(ctx, container, "getAllItems",
+                      JS_NewCFunction(ctx,
+                                      [](JSContext* c, JSValueConst self, int, JSValueConst*) {
+                                          return JS_GetPropertyStr(c, self, "items");
+                                      },
+                                      "getAllItems", 0));
+    JS_SetPropertyStr(ctx, container, "isEmpty",
+                      JS_NewCFunction(ctx,
+                                      [](JSContext* c, JSValueConst self, int,
+                                         JSValueConst*) -> JSValue {
+                                          JSValue list = JS_GetPropertyStr(c, self, "items");
+                                          JSValue len = JS_GetPropertyStr(c, list, "length");
+                                          int32_t n = 0;
+                                          JS_ToInt32(c, &n, len);
+                                          JS_FreeValue(c, len);
+                                          JS_FreeValue(c, list);
+                                          return JS_NewBool(c, n == 0);
+                                      },
+                                      "isEmpty", 0));
+    return container;
+}
+
 JSValue player_container_view(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv,
                               int32_t window_id) {
     void* handle = player_handle(ctx, this_val);
@@ -1303,12 +1383,84 @@ JSValue player_container_view(JSContext* ctx, JSValueConst this_val, int argc, J
     (void)argc;
     (void)argv;
 
+    /*
+     * Preferred path: the script bridge, which reads the container through the
+     * official API.  The player's slot array is not an EnTT component on the
+     * builds examined, so this is the only source that reflects the server's
+     * real inventory.
+     */
+    JSValue player_name_value = JS_GetPropertyStr(ctx, this_val, "name");
+    const char* player_name_text = JS_ToCString(ctx, player_name_value);
+    const std::string player_name = player_name_text != nullptr ? player_name_text : "";
+    if (player_name_text != nullptr) {
+        JS_FreeCString(ctx, player_name_text);
+    }
+    JS_FreeValue(ctx, player_name_value);
+
+    if (!player_name.empty()) {
+        if (auto state = bridge_state_player(player_name); state.has_value()) {
+            const BridgeContainer* source = nullptr;
+            const char* type_name = "inventory";
+            if (window_id == 0) {
+                source = &state->inventory;
+            } else if (window_id == 120) {
+                source = &state->equipment;
+                type_name = "armor";
+            } else if (window_id == 119) {
+                source = &state->equipment;
+                type_name = "offhand";
+            } else if (window_id == -1) {
+                source = &state->ender_chest;
+                type_name = "enderChest";
+            }
+            if (source != nullptr && source->valid) {
+                std::vector<JSValue> slots;
+                slots.reserve(static_cast<size_t>(source->size));
+                for (int32_t i = 0; i < source->size; ++i) {
+                    if (auto item = source->at(i); item.has_value()) {
+                        JSValue value = make_item_object(ctx, item->type_id, item->amount, 0);
+                        JS_SetPropertyStr(ctx, value, "slot", JS_NewInt32(ctx, item->slot));
+                        slots.push_back(value);
+                    } else {
+                        slots.push_back(JS_NULL);
+                    }
+                }
+                return container_from_slots(ctx, type_name, slots);
+            }
+            if (window_id == 120 || window_id == 119 || window_id == -1) {
+                return container_from_slots(ctx, type_name, {});
+            }
+        }
+    }
+
+    /* Native container, when this build actually stores one on the actor. */
+    LiveContainer live;
+    if (window_id == 0 && native_container_read(handle, live) && live.valid) {
+        std::vector<JSValue> slots;
+        slots.reserve(live.slots.size());
+        for (const auto& stack : live.slots) {
+            slots.push_back(item_from_live_stack(ctx, stack));
+        }
+        return container_from_slots(ctx, "inventory", slots);
+    }
+
     ContainerSnapshot snapshot;
     if (!inventory_cache_get(window_id, snapshot)) {
+        if (window_id != 0) {
+            const char* what = window_id == 120   ? "armor"
+                               : window_id == 119 ? "offhand"
+                               : window_id == -1  ? "ender chest"
+                                                  : "container";
+            return JS_ThrowInternalError(
+                ctx,
+                "the %s container is not exposed by this build: its component layout is not "
+                "verified here and no InventoryContent packet has been observed yet",
+                what);
+        }
         return JS_ThrowInternalError(
             ctx,
-            "this inventory has not been observed yet; it is read from InventoryContent packets, "
-            "so wait until the server sends one");
+            "this inventory has not been observed yet: the native container layout is not "
+            "verified for this build and no InventoryContent packet has arrived");
     }
 
     JSValue container = JS_NewObject(ctx);
@@ -1421,14 +1573,17 @@ JSValue player_give_item(JSContext* ctx, JSValueConst this_val, int argc, JSValu
 JSValue player_inventory_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return JS_ThrowInternalError(
         ctx,
-        "inventory access (giveItem/getInventory/getArmor/getEnderChest) is not implemented by "
-        "YoyoLoader: it needs the version-specific Container/ItemStack layout");
+        "inventory access is unavailable on this build: the player inventory is not an EnTT "
+        "component (only block-entity containers are), and no verified native path exists yet. "
+        "The Script API bridge can read it when deployed");
 }
 
 JSValue player_nbt_stub(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return JS_ThrowInternalError(
-        ctx, "player NBT is not implemented by YoyoLoader: full player NBT serialisation is the most "
-             "version-fragile area of BDS");
+        ctx,
+        "player NBT is unavailable on this build: Player NBT is not a component and its "
+        "serialisation layout is not verified. mc.newNbt()/nbt objects still work for data you "
+        "build yourself");
 }
 
 JSValue player_send_form(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {

@@ -100,6 +100,13 @@ bool live_get_network_id(void* player, std::vector<uint8_t>& network_id, uint8_t
 bool live_actor_valid(void* actor);
 
 /*
+ * Resolve an EnTT component of `actor` by its 32-bit type hash.  `size` is the
+ * component's stride inside the dense page, which differs per platform, so
+ * callers must pass the value recorded for the running build.
+ */
+void* entt_try_get(void* actor, uint32_t type_hash, size_t component_size);
+
+/*
  * Layout safety.
  *
  * Object offsets are compiler/ABI dependent, so a new build on the same

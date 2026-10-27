@@ -73,7 +73,9 @@
 | `getHealth` | 🟡 | 出站 SetHealth 缓存；未收到包时返回 null |
 | `isSneaking` / `isSprinting` / `isFlying` | 🟡 | PlayerAuthInput / PlayerAction 状态缓存 |
 | `getHeldItemSlot` | 🟡 | PlayerEquipment 槽位启发式解析 |
-| `getNbt` / 背包 / 权限 / 皮肤对象 / Ping / `setHealth` | ❌ | 尚未接入 |
+| `getNbt` / `setNbt` | ❌ | 玩家 NBT 不是组件，序列化布局未验证 |
+| `getInventory` / `getArmor` / `getEnderChest` / `giveItem` | ❌ 原生 | 玩家背包**不是 EnTT 组件**（只有方块实体容器是），见 `docs/RE_NOTES.md` 11.4 |
+| 权限 / 皮肤对象 / Ping / `setHealth` | ❌ | 尚未接入 |
 | 跨维度传送 | ❌ | 需要 `Level::entityChangeDimension` / changeDimension request |
 
 ## NBT

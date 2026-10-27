@@ -7,6 +7,7 @@
 #include "js/js_engine.h"
 #include "live.h"
 #include "log.h"
+#include "memory_span.h"
 #include "native_string.h"
 #include "players.h"
 #include "runtime.h"
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 #include <iterator>
@@ -744,6 +746,98 @@ void handle_outgoing_health(PlayerView& player, void* packet) {
     }
 }
 
+/*
+ * Find the slot array inside an inventory packet and cache it.
+ *
+ * The payload of these packets is not a flat byte blob: the packet object owns
+ * the container id and a std::vector<ItemStack>, and the byte offset of that
+ * vector differs per build.  Writing a fixed offset is what truncated the data
+ * in earlier attempts.
+ *
+ * Instead the packet object itself is scanned for a pointer triple that passes
+ * strict validation: the range must be readable, the element stride must be
+ * exactly the ItemStack size, the bucket count must be plausible, and every
+ * occupied element must carry a sane validity flag, count and aux value.  Every
+ * dereference is preceded by readable_range(), so a wrong candidate returns
+ * false instead of faulting.
+ */
+/*
+ * Decode an inventory packet payload.
+ *
+ * The payload is the protocol's own wire format, which is far more stable than
+ * any C++ layout: window id (varint), slot count (varint), then that many Item
+ * records.  The buffer bound comes from the process memory map rather than a
+ * fixed constant, so a short allocation can never be over-read - that overrun
+ * is what crashed the server in an earlier attempt.
+ */
+/*
+ * Expected slot count per window id.
+ *
+ * The protocol definition gives the payload shape (window id, then an array of
+ * ItemV4), but the offset where the payload starts is not the same for every
+ * packet class.  Rather than trusting a constant, a candidate offset is only
+ * accepted when decoding it yields a known window id *and* exactly that
+ * window's slot count.  A wrong offset cannot satisfy both.
+ */
+int expected_slots(int32_t window_id) {
+    switch (window_id) {
+    case 0: return 36;   /* player inventory */
+    case 119: return 1;  /* offhand */
+    case 120: return 4;  /* armor */
+    case 124: return 27; /* ui / cursor container */
+    default: return -1;
+    }
+}
+
+void capture_inventory_packet(void* player, void* packet, int packet_id) {
+    const auto* payload = static_cast<const unsigned char*>(packet) + kPacketBaseSize;
+    const size_t span = readable_span(payload);
+    if (span < 8) {
+        return;
+    }
+    const size_t limit = span < 32 * 1024 ? span : 32 * 1024;
+    const std::vector<uint8_t> buffer(payload, payload + limit);
+
+    if (packet_id == kPacketInventoryContent) {
+        for (size_t start = 0; start < 128 && start + 8 < limit; ++start) {
+            const std::vector<uint8_t> slice(buffer.begin() + static_cast<long>(start), buffer.end());
+            ContainerSnapshot candidate;
+            if (!parse_inventory_content(slice, candidate)) {
+                continue;
+            }
+            const int expected = expected_slots(candidate.window_id);
+            if (expected < 0 || static_cast<int>(candidate.slots.size()) != expected) {
+                continue;
+            }
+            inventory_cache_store(candidate);
+            log_write(LogLevel::Info,
+                      "inventory packet: window=%d slots=%zu (payload at packet+0x%zx)",
+                      candidate.window_id, candidate.slots.size(),
+                      kPacketBaseSize + start);
+            break;
+        }
+    } else {
+        /* InventorySlot: window id, slot index, then one ItemV4.  The same
+         * strictness applies: the slot index must be in range for the window. */
+        for (size_t start = 0; start < 128 && start + 8 < limit; ++start) {
+            const std::vector<uint8_t> slice(buffer.begin() + static_cast<long>(start), buffer.end());
+            int32_t window_id = 0;
+            int32_t slot = 0;
+            ItemStackView item;
+            if (!parse_inventory_slot(slice, window_id, slot, item)) {
+                continue;
+            }
+            const int expected = expected_slots(window_id);
+            if (expected < 0 || slot < 0 || slot >= expected) {
+                continue;
+            }
+            inventory_cache_store_slot(window_id, slot, item);
+            break;
+        }
+    }
+    (void)player;
+}
+
 void send_packet_detour(void* player_handle, void* packet) {
     const int packet_id = packet_id_for(packet);
     if (std::getenv("YOYO_DEBUG_SEND") != nullptr) {
@@ -777,6 +871,8 @@ void send_packet_detour(void* player_handle, void* packet) {
                 world_state().weather = world_state().weather == 1 ? 1 : 0;
                 world_state().weather_valid = true;
             }
+        } else if (packet_id == kPacketInventoryContent || packet_id == kPacketInventorySlot) {
+            capture_inventory_packet(player_handle, packet, packet_id);
         } else if (packet_id == kPacketUpdateBlock) {
             /*
              * UpdateBlockPacket payload:

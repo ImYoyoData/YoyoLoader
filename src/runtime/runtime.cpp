@@ -4,6 +4,9 @@
 #include "hooks.h"
 #include "live.h"
 #include "log.h"
+#include "bridge_state.h"
+#include "dynamic_content.h"
+#include "native_inventory.h"
 #include "packet_events.h"
 #include "plugin_loader.h"
 #include "script_bridge.h"
@@ -50,6 +53,7 @@ void runtime_start() {
     }
 
     log_capability_report();
+    native_inventory_report();
 
     g_state.symbols = resolve_symbols(g_state.module.base, g_state.profile);
     log_write(LogLevel::Info, "symbol resolution: %s", describe_resolution(g_state.symbols).c_str());
@@ -73,7 +77,15 @@ void runtime_start() {
     const auto bridge = script_bridge_install(g_state.module.base != 0 ? "." : ".");
     if (!bridge.available) {
         log_write(LogLevel::Warn, "script bridge unavailable: %s", bridge.reason.c_str());
+    } else {
+        /*
+         * The bridge pushes player state over loopback HTTP because its script
+         * engine and our QuickJS contexts cannot share objects.  The listener
+         * has to exist before the first push, which happens once a world loads.
+         */
+        bridge_state_start(8765);
     }
+    dynamic_content_report();
 
     worlds::initialize();
     start_plugin_loader();

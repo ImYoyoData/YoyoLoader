@@ -31,6 +31,11 @@ set(YOYO_RUNTIME_SOURCES
     src/runtime/live.cpp
     src/runtime/client_commands.cpp
     src/runtime/inventory.cpp
+    src/runtime/memory_span.cpp
+    src/runtime/bridge_state.cpp
+    src/runtime/dynamic_content.cpp
+    src/runtime/components.cpp
+    src/runtime/native_inventory.cpp
     src/runtime/script_bridge.cpp
     src/runtime/packet_events.cpp
     src/runtime/worlds.cpp

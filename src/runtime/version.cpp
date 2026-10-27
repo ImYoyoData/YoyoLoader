@@ -90,9 +90,22 @@ const VersionProfile kLinux = {
         0x38,  /* EntityRegistry::pools begin */
         0x40,  /* EntityRegistry::pools end */
         0x50,  /* EntityRegistry::pools entries */
+        0x58,  /* EntityRegistry::pools entries end */
         88,    /* TextPacketPayload::body */
         56,    /* std::variant index inside body */
         0xDCB, /* ServerPlayer::local_player_initialized_ */
+        /* container: sizes and offsets observed in the 1.26.52.3 Linux binary
+         * (ContainerComponent 0x1a0 bytes, slot vector at +0x150) */
+        0x1a0, /* container_component_size */
+        0x150, /* container_slots_offset */
+        0x10,  /* container_object_offset */
+        0x98,  /* item_stack_size */
+        0x08,  /* item_stack_item */
+        0x20,  /* item_stack_aux */
+        0x22,  /* item_stack_count */
+        0x23,  /* item_stack_valid */
+        0x78,  /* item_stack_user_data */
+        0xAA,  /* item_id_offset */
     },
     kFullCapabilities,
 };
@@ -151,9 +164,22 @@ const VersionProfile kWindows = {
         0x48,  /* EntityRegistry::pools begin */
         0x50,  /* EntityRegistry::pools end */
         0x68,  /* EntityRegistry::pools entries */
+        0x70,  /* EntityRegistry::pools entries end */
         112,   /* TextPacketPayload::body */
         72,    /* std::variant index inside body */
         0xDB7, /* ServerPlayer::local_player_initialized_ */
+        /* container: ContainerComponent is 0x200 bytes here and holds the slot
+         * vector at +0x1a8 (both confirmed by disassembly) */
+        0x200, /* container_component_size */
+        0x1a8, /* container_slots_offset */
+        0x10,  /* container_object_offset */
+        0x98,  /* item_stack_size */
+        0x08,  /* item_stack_item */
+        0x20,  /* item_stack_aux */
+        0x22,  /* item_stack_count */
+        0x23,  /* item_stack_valid */
+        0x78,  /* item_stack_user_data */
+        0xAA,  /* item_id_offset */
     },
     kFullCapabilities,
 };
@@ -243,9 +269,20 @@ const VersionProfile kWindows1270 = {
         0x48,
         0x50,
         0x68,
+        0x70,
         112,
         72,
         0xDB7,
+        0x200, /* container_component_size */
+        0x1a8, /* container_slots_offset */
+        0x10,  /* container_object_offset */
+        0x98,  /* item_stack_size */
+        0x08,  /* item_stack_item */
+        0x20,  /* item_stack_aux */
+        0x22,  /* item_stack_count */
+        0x23,  /* item_stack_valid */
+        0x78,  /* item_stack_user_data */
+        0xAA,  /* item_id_offset */
     },
     kPreviewCapabilities,
 };
@@ -324,9 +361,20 @@ const VersionProfile kLinux1270 = {
         0x38,
         0x40,
         0x50,
+        0x58,
         88,
         56,
         0xDCB,
+        0x1a0, /* container_component_size */
+        0x150, /* container_slots_offset */
+        0x10,  /* container_object_offset */
+        0x98,  /* item_stack_size */
+        0x08,  /* item_stack_item */
+        0x20,  /* item_stack_aux */
+        0x22,  /* item_stack_count */
+        0x23,  /* item_stack_valid */
+        0x78,  /* item_stack_user_data */
+        0xAA,  /* item_id_offset */
     },
     kLinuxPreviewCapabilities,
 };

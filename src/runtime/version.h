@@ -37,9 +37,29 @@ struct LiveProfile {
     uint32_t entt_pools_begin = 0;
     uint32_t entt_pools_end = 0;
     uint32_t entt_entries = 0;
+    /* End of the pool-entry array.  The sparse bucket stores an index into it,
+     * so without this bound a stale bucket reads arbitrary memory. */
+    uint32_t entt_entries_end = 0;
     uint32_t text_body_offset = 0;
     uint32_t text_variant_index_offset = 0;
     uint32_t join_flag_offset = 0;
+
+    /*
+     * Container / item layout.  These are ABI-specific, not version-specific:
+     * MSVC and libc++ lay out the same classes differently (ContainerComponent
+     * is 0x200 bytes on Windows and 0x1a0 on Linux), so every entry records its
+     * own values and a missing value disables the feature instead of guessing.
+     */
+    uint32_t container_component_size = 0; /* stride inside the dense page */
+    uint32_t container_slots_offset = 0;   /* std::vector<ItemStack> inside it */
+    uint32_t container_object_offset = 0;  /* Container* with the virtual setItem/getItem */
+    uint32_t item_stack_size = 0;          /* stride of one ItemStack */
+    uint32_t item_stack_item = 0;          /* WeakPtr<Item>: two derefs, then item_id_offset */
+    uint32_t item_stack_aux = 0;           /* uint16, 0x7fff means "no aux value" */
+    uint32_t item_stack_count = 0;         /* uint8 stack size */
+    uint32_t item_stack_valid = 0;         /* uint8, 1 when the slot holds an item */
+    uint32_t item_stack_user_data = 0;     /* refcounted NBT holder, null when absent */
+    uint32_t item_id_offset = 0;           /* int16 item id inside Item */
 };
 
 /*

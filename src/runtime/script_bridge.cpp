@@ -61,7 +61,7 @@ std::string manifest_json() {
         << "    }\n"
         << "  ],\n"
         << "  \"dependencies\": [\n"
-        << "    { \"module_name\": \"@minecraft/server\", \"version\": \"1.17.0\" }\n"
+        << "    { \"module_name\": \"@minecraft/server\", \"version\": \"1.17.0\" },\n"
         << "  ],\n"
         << "  \"capabilities\": [\"script_eval\"]\n"
         << "}\n";
@@ -77,6 +77,19 @@ std::string manifest_json() {
  */
 const char* kBridgeScript = R"JS(
 import * as mc from "@minecraft/server";
+/*
+ * server-net is optional: it exists on dedicated servers but not on every
+ * build, and a hard import would stop the whole bridge from loading.  The
+ * inventory bridge registers its handler only when the module is present.
+ */
+let net = null;
+try {
+    net = await import("@minecraft/server-net");
+} catch (e) {
+    net = null;
+    console.warn("[YoyoLoader] server-net unavailable: " + String(e && e.message));
+}
+console.warn("[YoyoLoader] server-net " + (net ? "loaded" : "MISSING"));
 
 /*
  * The bridge publishes the official API plus a few helpers that make it behave
@@ -130,6 +143,67 @@ const api = {
     itemType: (item) => item.typeId,
     itemCount: (item) => item.amount,
     cloneItem: (item) => item.clone(),
+
+    /*
+     * --- container helpers ---
+     *
+     * The injector cannot reach the player's slot array: it is not an EnTT
+     * component, and walking ServerPlayer for it crashes.  These helpers are
+     * therefore the supported path for inventory access, and they return plain
+     * data so nothing script-owned escapes the bridge.
+     */
+    containerSize: (c) => c.size,
+    containerGet: (c, slot) => {
+        const item = c.getItem(slot);
+        if (!item) return null;
+        return { typeId: item.typeId, amount: item.amount, slot };
+    },
+    containerAll: (c) => {
+        const out = [];
+        for (let i = 0; i < c.size; i++) {
+            const item = c.getItem(i);
+            out.push(item ? { typeId: item.typeId, amount: item.amount, slot: i } : null);
+        }
+        return out;
+    },
+    containerSet: (c, slot, typeId, amount) => {
+        if (amount <= 0) {
+            c.setItem(slot, undefined);
+            return true;
+        }
+        const stack = new mc.ItemStack(String(typeId), amount);
+        c.setItem(slot, stack);
+        return true;
+    },
+    containerEmpty: (c) => {
+        for (let i = 0; i < c.size; i++) c.setItem(i, undefined);
+        return true;
+    },
+    /* Put a stack in the first slot that can take it. */
+    containerAdd: (c, typeId, amount) => {
+        const stack = new mc.ItemStack(String(typeId), amount);
+        const left = c.addItem(stack);
+        return { added: amount - (left ? left.amount : 0), leftover: left ? left.amount : 0 };
+    },
+    playerContainer: (p, which) => {
+        if (which === "ender") return p.getComponent("minecraft:ender_inventory").container;
+        if (which === "armor") return p.getComponent("minecraft:equippable");
+        return p.getComponent("minecraft:inventory").container;
+    },
+    /* Armor slots are named, so expose them as an array-like view. */
+    equipmentAll: (eq) => {
+        const out = [];
+        for (const slot of ["Head", "Chest", "Legs", "Feet", "Offhand"]) {
+            let item = null;
+            try { item = eq.getEquipment(slot); } catch (e) { item = null; }
+            out.push(item ? { typeId: item.typeId, amount: item.amount, slot } : null);
+        }
+        return out;
+    },
+    equipmentSet: (eq, slot, typeId, amount) => {
+        eq.setEquipment(slot, amount > 0 ? new mc.ItemStack(String(typeId), amount) : undefined);
+        return true;
+    },
 };
 
 mc.system.run(() => {
@@ -154,6 +228,88 @@ mc.world.afterEvents.playerSpawn.subscribe((ev) => {
 mc.world.afterEvents.playerLeave.subscribe((ev) => {
     console.warn("[YoyoLoader:bridge] playerLeave " + ev.playerName);
 });
+
+/*
+ * Push player state to the injector.
+ *
+ * The bridge runs in BDS's own script engine while YoyoLoader plugins run in
+ * QuickJS: the two cannot share objects.  HTTP is the only channel the official
+ * API offers for getting data out of the game, so the bridge posts a snapshot
+ * and the injector keeps it in a per-player cache.  Everything is optional: if
+ * server-net or the local server is unavailable the bridge keeps working and
+ * plugins fall back to packet-derived data.
+ */
+const BRIDGE_PORT = 8765;
+const BRIDGE_URL = "http://127.0.0.1:" + BRIDGE_PORT + "/state";
+
+async function pushState() {
+    if (!net) return;
+    try {
+        const players = [];
+        for (const p of mc.world.getAllPlayers()) {
+            const entry = { name: p.name, id: p.id };
+            try { entry.gameMode = p.getGameMode(); } catch (e) {}
+            try {
+                const hp = p.getComponent("minecraft:health");
+                entry.health = hp ? hp.currentValue : undefined;
+            } catch (e) {}
+            try {
+                const inv = p.getComponent("minecraft:inventory").container;
+                const slots = [];
+                for (let i = 0; i < inv.size; i++) {
+                    const it = inv.getItem(i);
+                    slots.push(it ? { slot: i, typeId: it.typeId, amount: it.amount } : null);
+                }
+                entry.inventory = { size: inv.size, slots };
+            } catch (e) {
+                entry.inventoryError = String(e && e.message);
+            }
+            try {
+                const ec = p.getComponent("minecraft:ender_inventory").container;
+                const slots = [];
+                for (let i = 0; i < ec.size; i++) {
+                    const it = ec.getItem(i);
+                    slots.push(it ? { slot: i, typeId: it.typeId, amount: it.amount } : null);
+                }
+                entry.enderChest = { size: ec.size, slots };
+            } catch (e) {}
+            try {
+                const eq = p.getComponent("minecraft:equippable");
+                const slots = api.equipmentAll(eq);
+                entry.equipment = { size: slots.length, slots };
+            } catch (e) {}
+            try {
+                const loc = p.location;
+                entry.location = { x: loc.x, y: loc.y, z: loc.z };
+                entry.dimension = p.dimension.id;
+            } catch (e) {}
+            players.push(entry);
+        }
+        const body = JSON.stringify({ players, tick: mc.system.currentTick });
+        const req = new net.HttpRequest(BRIDGE_URL);
+        req.method = net.HttpRequestMethod.Post;
+        req.body = body;
+        req.headers = [new net.HttpHeader("Content-Type", "application/json")];
+        await net.http.request(req);
+    } catch (e) {
+        /* A failed push must never affect gameplay, but it is logged once so a
+         * misconfigured bridge is diagnosable. */
+        if (!globalThis.__yoyoPushWarned) {
+            globalThis.__yoyoPushWarned = true;
+            console.warn("[YoyoLoader] state push failed: " + String(e && e.message));
+        }
+    }
+}
+
+/* Push on a fixed cadence rather than every tick. */
+let pushCounter = 0;
+mc.system.runInterval(() => {
+    if (++pushCounter < 10) return;
+    pushCounter = 0;
+    pushState();
+}, 5);
+
+mc.world.afterEvents.playerSpawn.subscribe(() => { pushState(); });
 )JS";
 
 std::string read_world_level_name(const fs::path& root) {

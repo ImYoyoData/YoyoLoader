@@ -39,6 +39,11 @@ cl %COMMON% /DYOYO_PLATFORM_WINDOWS=1 /DYOYO_RUNTIME_BUILD=1 /Iinclude /Isrc\run
     src\runtime\live.cpp ^
     src\runtime\client_commands.cpp ^
     src\runtime\inventory.cpp ^
+    src\runtime\memory_span.cpp ^
+    src\runtime\bridge_state.cpp ^
+    src\runtime\dynamic_content.cpp ^
+    src\runtime\components.cpp ^
+    src\runtime\native_inventory.cpp ^
     src\runtime\script_bridge.cpp ^
     src\runtime\packet_events.cpp ^
     src\runtime\worlds.cpp ^

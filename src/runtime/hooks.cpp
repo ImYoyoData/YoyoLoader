@@ -4,6 +4,7 @@
 #include "events.h"
 #include "hook_engine.h"
 #include "live.h"
+#include "native_inventory.h"
 #include "log.h"
 #include "native_string.h"
 #include "packet_events.h"
@@ -362,6 +363,11 @@ bool try_to_load_player_detour(void* self, void* server_player, const void* conn
     install_packet_send_hook(player.handle);
     live_validate_layout(player.handle);
 
+    /*
+     * Discovery is not run here: at pre_join the ServerPlayer has not been
+     * initialised yet, so its member pointers are not all valid and walking
+     * them faults.  The join hook runs after SetLocalPlayerAsInitialized.
+     */
     bool cancelled = false;
     emit_pre_join(player, cancelled);
     if (cancelled) {
@@ -447,6 +453,13 @@ void set_local_player_initialized_detour(void* self, const void* network_id, con
     }
     bool cancelled = false;
     emit_join(player, player_id, cancelled);
+
+    /* Explicitly requested diagnostics: dump the live container so the
+     * ItemStack offsets can be checked against a stack the server built. */
+    if (player.handle != nullptr && std::getenv("YOYO_DUMP_CONTAINER") != nullptr) {
+        native_inventory_discover(player.handle);
+        native_inventory_dump(player.handle);
+    }
 
     /*
      * The client's command list comes from AvailableCommandsPacket, which the
