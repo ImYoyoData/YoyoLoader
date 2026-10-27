@@ -1,5 +1,6 @@
 #include "hooks.h"
 
+#include "client_commands.h"
 #include "events.h"
 #include "hook_engine.h"
 #include "live.h"
@@ -196,6 +197,12 @@ void level_tick_detour(void* level) {
                     bool cancelled = false;
                     log_write(LogLevel::Info, "join watcher saw initialized handle=%p", item.handle);
                     emit_join(view, view.runtime_id, cancelled);
+                    /*
+                     * Re-send the command table once the player is fully in the
+                     * world: that is when the vanilla table has been captured,
+                     * so plugin commands can be merged into it.
+                     */
+                    client_commands_send(item.handle);
                 }
             }
             if (!keep.empty()) {
@@ -440,6 +447,19 @@ void set_local_player_initialized_detour(void* self, const void* network_id, con
     }
     bool cancelled = false;
     emit_join(player, player_id, cancelled);
+
+    /*
+     * The client's command list comes from AvailableCommandsPacket, which the
+     * server builds internally from CommandRegistry.  Writing our own packet
+     * is not safe: the packet object owns STL members (vectors), so filling its
+     * payload with our bytes corrupts those members and the server crashes.
+     * Advertising plugin commands therefore requires registering them with
+     * CommandRegistry itself, which is still being reverse engineered.
+     */
+    if (player.handle != nullptr && client_commands_ready()) {
+        client_commands_send(player.handle);
+    }
+
     /* onJoin is informational; never drop the original call. */
     if (g_set_local_init_original != nullptr) {
         g_set_local_init_original(self, network_id, packet);

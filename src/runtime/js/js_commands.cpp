@@ -1,5 +1,8 @@
 #include "js_internal.h"
 
+#include "../client_commands.h"
+#include "../js/js_engine.h"
+
 #include "../events.h"
 #include "../log.h"
 #include "../players.h"
@@ -124,18 +127,28 @@ void register_commands(JSContext* ctx) {
                                               JS_ToInt32(c, &permission, argv[3]);
                                           }
                                           JSValue callback = JS_DupValue(c, argv[2]);
-                                          std::lock_guard lock(command_mutex());
-                                          auto& commands = player_commands();
-                                          auto it = commands.find(name);
-                                          if (it != commands.end()) {
-                                              JS_FreeValue(c, it->second.callback);
-                                              it->second.callback = callback;
-                                              it->second.ctx = c;
-                                              it->second.description = value_to_text(c, argv[1]);
-                                              it->second.permission = permission;
-                                          } else {
-                                              commands[name] = CommandEntry{value_to_text(c, argv[1]), callback, c, permission};
+                                          const std::string description = value_to_text(c, argv[1]);
+                                          {
+                                              /* Register first, then release the lock:
+                                               * client_commands_refresh() reads the registry
+                                               * and would deadlock on this same mutex. */
+                                              std::lock_guard lock(command_mutex());
+                                              auto& commands = player_commands();
+                                              auto it = commands.find(name);
+                                              if (it != commands.end()) {
+                                                  JS_FreeValue(c, it->second.callback);
+                                                  it->second.callback = callback;
+                                                  it->second.ctx = c;
+                                                  it->second.description = description;
+                                                  it->second.permission = permission;
+                                              } else {
+                                                  commands[name] = CommandEntry{description, callback, c, permission};
+                                              }
                                           }
+                                          /* Mirror the registration in the client
+                                           * command table so it shows up in
+                                           * tab-completion and /help. */
+                                          client_commands_refresh();
                                           return JS_TRUE;
                                       },
                                       "regPlayerCmd", 4));
@@ -167,6 +180,16 @@ void register_commands(JSContext* ctx) {
                                       "regConsoleCmd", 3));
     JS_FreeValue(ctx, mc);
     JS_FreeValue(ctx, global);
+}
+
+std::vector<RegisteredCommand> js_registered_commands() {
+    std::vector<RegisteredCommand> out;
+    std::lock_guard lock(command_mutex());
+    out.reserve(player_commands().size());
+    for (const auto& [name, entry] : player_commands()) {
+        out.push_back({name, entry.description, entry.permission});
+    }
+    return out;
 }
 
 void clear_commands() {

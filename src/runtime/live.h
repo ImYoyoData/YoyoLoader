@@ -58,6 +58,13 @@ bool live_set_time(void* player, int ticks);
 bool live_set_weather(void* player, int weather); /* 0 clear, 1 rain, 2 thunder */
 /* UpdateBlockPacket: tell a client that a block changed. */
 bool live_set_block(void* player, int x, int y, int z, uint32_t runtime_id, int flags);
+
+/*
+ * Build a packet by id and copy `body` into its payload area. Only use this for
+ * packets whose payload is a flat byte blob that we assemble ourselves
+ * (AvailableCommands); packets with STL members need their own builders.
+ */
+bool live_send_raw_packet(void* player, int packet_id, const std::vector<uint8_t>& body);
 bool live_transfer(void* player, std::string_view host, int port);
 
 /* Actor geometry.  getPosition returns the eye position BDS stores in

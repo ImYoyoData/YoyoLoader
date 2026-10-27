@@ -1,5 +1,6 @@
 #include "packet_events.h"
 
+#include "client_commands.h"
 #include "events.h"
 #include "hook_engine.h"
 #include "js/js_engine.h"
@@ -37,6 +38,7 @@ constexpr int kPacketDeathInfo = 189;
 constexpr int kPacketContainerOpen = 46;
 constexpr int kPacketContainerClose = 47;
 constexpr int kPacketCommandRequest = 77;
+constexpr int kPacketAvailableCommands = 76;
 constexpr int kPacketPlayerSkin = 93;
 constexpr int kPacketModalFormResponse = 101;
 constexpr int kPacketEmote = 138;
@@ -799,6 +801,13 @@ void send_packet_detour(void* player_handle, void* packet) {
                                      static_cast<uint64_t>(entry.y + 512);
                 blocks[key] = entry;
             }
+        } else if (packet_id == kPacketAvailableCommands) {
+            /*
+             * The client's command list comes from this packet. Keep the
+             * payload so plugin commands can be merged into it later.
+             */
+            log_write(LogLevel::Info, "observed AvailableCommandsPacket (id 76)");
+            client_commands_capture(packet);
         } else if (packet_id == kPacketSetHealth) {
             handle_outgoing_health(player, packet);
         } else if (packet_id == kPacketRespawn) {

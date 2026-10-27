@@ -44,4 +44,12 @@ void dispatch_form_response(uint32_t form_id, const PlayerView& player, const st
 bool has_player_command(const std::string& message);
 bool run_player_command(const PlayerView& player, const std::string& message, std::string& output);
 
+/* Snapshot of the registered plugin commands, for the client command table. */
+struct RegisteredCommand {
+    std::string name;
+    std::string description;
+    int permission = 0;
+};
+std::vector<RegisteredCommand> js_registered_commands();
+
 } // namespace yoyo::js

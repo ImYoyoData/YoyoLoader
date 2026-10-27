@@ -568,6 +568,17 @@ bool live_set_block(void* player, int x, int y, int z, uint32_t runtime_id, int 
     return send_network_packet(player, packet.get());
 }
 
+bool live_send_raw_packet(void* player, int packet_id, const std::vector<uint8_t>& body) {
+    NativePacket packet(packet_id);
+    if (!packet) {
+        log_write(LogLevel::Warn, "cannot allocate packet id=%d", packet_id);
+        return false;
+    }
+    auto* payload = static_cast<unsigned char*>(packet.get()) + kPacketBaseSize;
+    std::memcpy(payload, body.data(), body.size());
+    return send_network_packet(player, packet.get());
+}
+
 bool live_transfer(void* player, std::string_view host, int port) {
     NativePacket packet(kPacketTransfer);
     if (!packet) {
