@@ -89,8 +89,10 @@ if errorlevel 1 exit /b 1
 
 rem Keep a checksum next to the archive for release verification.
 rem Standard "hash *filename" form so the file can be checked directly.
+rem Written through [IO.File] because redirection in a .bat yields CRLF, and
+rem sha256sum -c rejects a checksum line that ends with CR.
 for %%A in ("%ZIP%") do set "ZIPNAME=%%~nxA"
-powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 '%ZIP%').Hash.ToLower(); Write-Output ($h + ' *' + '%ZIPNAME%')" > "%ZIP%.sha256"
+powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 -LiteralPath '%ZIP%').Hash.ToLower(); [IO.File]::WriteAllText('%ZIP%.sha256', $h + '  ' + '%ZIPNAME%' + \"`n\")"
 
 echo [package] done: %ZIP%
 endlocal
