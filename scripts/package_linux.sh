@@ -80,7 +80,8 @@ echo "[package] creating $ARCHIVE"
 tar -czf "$ARCHIVE" -C "$STAGE" .
 
 if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$ARCHIVE" | awk '{print $1}' > "$ARCHIVE.sha256"
+    # Keep the file name in the checksum line so `sha256sum -c` works directly.
+    ( cd "$(dirname "$ARCHIVE")" && sha256sum "$(basename "$ARCHIVE")" ) > "$ARCHIVE.sha256"
 fi
 
 echo "[package] done: $ARCHIVE"

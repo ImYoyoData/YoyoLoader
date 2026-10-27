@@ -88,7 +88,9 @@ powershell -NoProfile -Command "Compress-Archive -Path '%STAGE%\*' -DestinationP
 if errorlevel 1 exit /b 1
 
 rem Keep a checksum next to the archive for release verification.
-powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 '%ZIP%').Hash.ToLower()" > "%ZIP%.sha256"
+rem Standard "hash *filename" form so the file can be checked directly.
+for %%A in ("%ZIP%") do set "ZIPNAME=%%~nxA"
+powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 '%ZIP%').Hash.ToLower(); Write-Output ($h + ' *' + '%ZIPNAME%')" > "%ZIP%.sha256"
 
 echo [package] done: %ZIP%
 endlocal
