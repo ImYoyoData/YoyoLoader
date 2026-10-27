@@ -36,3 +36,6 @@ dist/
 
 _ci/
 _accept/
+
+# Scratch pages fetched while checking CI results
+*.html
