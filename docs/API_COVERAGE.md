@@ -105,7 +105,8 @@
 |---|---|
 | `setTimeout` / `setInterval` / `clearInterval` / `clearTimeout`（函数或代码字符串） | ✅ 由 `Level::tick` 驱动，已自测 |
 | `log` / `colorLog` / `fastLog` | ✅ |
-| `mc.regPlayerCmd` / `mc.regConsoleCmd` | 🟡 聊天命令层；玩家命令已接入 `onChat`，控制台命令需控制台输入 hook |
+| `mc.regPlayerCmd` | ✅ 但**是假命令**：拦 `CommandRequestPacket` 提前处理，不写入 BDS 命令表，客户端不会补全/不出现在 `/help` |
+| `mc.regConsoleCmd` | 🟡 需控制台输入 hook |
 | `new JsonConfigFile` / `new IniConfigFile`（含 `mc.newConfig`） | ✅ 路径限制在服务器目录内，已自测 |
 | `new File` + 同步/异步方法 | ✅ 同步实现；异步方法同步回调，已自测 |
 | `mc.getBDSVersion` / `mc.getDimensionId` / `mc.getDimensionName` / `mc.getOnlinePlayerNum` | ✅ |

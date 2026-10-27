@@ -76,6 +76,22 @@ Linux:    cp yoyo bedrock_server_mod
 那几项，其余一律禁用。未知版本永远从“全部关闭”开始，绝不会因为“看起来像”就
 按旧布局读写内存。
 
+### 2.1.1 与版本无关的能力边界
+
+有几件事**不是**版本问题，而是在任何 BDS 版本上都成立，值得先看清楚：
+
+- **玩家背包不是 EnTT 组件**。`ContainerComponent` 只用于方块实体（箱子、漏斗等）；
+  玩家背包在 `PlayerInventory` 里。因此 `getInventory` / `getArmor` /
+  `getEnderChest` / `giveItem` 没有原生实现（证据见 `docs/RE_NOTES.md` 11.4）。
+- **`mc.regPlayerCmd` 是假命令**。它拦截 `CommandRequestPacket` 提前处理，
+  不写入 BDS 命令表，客户端不会补全、`/help` 里也看不到。真命令需要改
+  `CommandRegistry`，该路径会崩服，已关闭。
+- **运行时无法注册新的物品 / 生物 / 材质 / 合成表**。这是游戏引擎的限制，
+  只能靠行为包；`dynamic_content` 把这四项固定报告为 `false`。
+
+能做什么、为什么有些做不到，见 [`docs/NATIVE_ACCESS.md`](docs/NATIVE_ACCESS.md)；
+逆向依据见 [`docs/RE_NOTES.md`](docs/RE_NOTES.md) 第 11 节。
+
 ### 2.2 测试环境
 
 测试使用 NetherNet / RakNet 传输的离线 bot（Windows 与 Linux 均在 Docker 中）连接真实 BDS。

@@ -752,7 +752,8 @@ JSValue mc_runcmd_unavailable(JSContext* ctx, JSValueConst, int argc, JSValueCon
         ctx,
         "runcmd is not available on this build: dispatching a synthetic CommandRequestPacket executes "
         "but leaves the server in an invalid state and it crashes on the next tick. "
-        "Use mc.regPlayerCmd for plugin commands.");
+        "Use mc.regPlayerCmd instead - it intercepts the command packet before BDS sees it, "
+        "which is safe.");
 }
 
 /* mc.getTime(TimeID): 0 daytime, 1 gametime, 2 day.  Read from packets. */

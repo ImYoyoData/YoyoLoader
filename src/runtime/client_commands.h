@@ -8,12 +8,20 @@
 namespace yoyo {
 
 /*
- * Client command table.
+ * Client command table - DISABLED.
  *
- * BDS sends AvailableCommandsPacket (id 76) to each player after login; the
- * client builds its tab-completion list and /help output from it.  Injecting
- * our own entries into that packet is what makes a plugin command look like a
- * real command instead of an unknown one.
+ * BDS sends AvailableCommandsPacket (id 76) to each player after login and the
+ * client builds its tab-completion list and /help output from it, so injecting
+ * entries here would be what made a plugin command look like a real one.
+ * That is not what mc.regPlayerCmd does today: it is a fake command that
+ * intercepts CommandRequestPacket before BDS parses it, and this table stays
+ * switched off.
+ *
+ * It is switched off because it crashed the server: the packet object owns
+ * std::vector members, and copying our bytes over its payload destroyed them,
+ * so the server died as the player joined.  client_commands_ready() returns
+ * false for that reason.  Re-enabling it requires registering commands through
+ * CommandRegistry instead of rewriting the packet.
  *
  * The packet is rebuilt per player from:
  *   - the command set the server already sent (captured from the outgoing

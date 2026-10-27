@@ -40,7 +40,8 @@ void dispatch_detail(int type, const PlayerView& player, const DetailEvent& deta
 void dispatch_form_response(uint32_t form_id, const PlayerView& player, const std::string& response,
                             int cancel_reason);
 
-/* Chat commands registered from JS (mc.regPlayerCmd). */
+/* Fake commands registered from JS (mc.regPlayerCmd): intercepted before
+ * BDS parses the packet, never added to the server's command table. */
 bool has_player_command(const std::string& message);
 bool run_player_command(const PlayerView& player, const std::string& message, std::string& output);
 
