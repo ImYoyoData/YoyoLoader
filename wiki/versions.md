@@ -111,7 +111,7 @@ plugin loader finished: 0 native, 3 javascript, 0 skipped
 
 ## 项目规则
 
-完整约束见仓库根目录 [PROJECT_RULES.md](../PROJECT_RULES.md)。核心几条：
+完整约束见仓库根目录 [PROJECT_RULES.md](PROJECT_RULES)。核心几条：
 
 1. 禁止假设支持所有版本
 2. 每个版本必须有明确条目；不确定的字段填 0 并标为不可用

@@ -71,7 +71,7 @@ yoyo.log
 
 ## 下一步
 
-- [插件格式](plugin-format.md) — 依赖、隔离、自动打包
-- [事件](events.md) — 全部事件
-- [命令](commands.md) — 真实命令注册
-- [版本支持](versions.md) — 受限功能与降级
+- [插件格式](plugin-format) — 依赖、隔离、自动打包
+- [事件](events) — 全部事件
+- [命令](commands) — 真实命令注册
+- [版本支持](versions) — 受限功能与降级

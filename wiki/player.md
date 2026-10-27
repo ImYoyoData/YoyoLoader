@@ -103,4 +103,4 @@ new DirectionAngle(pitch, yaw)
 | `pl.getArmor()` | 同上 |
 | `pl.getEnderChest()` | 同上 |
 | `pl.getNbt()` / `pl.setNbt(nbt)` | 完整玩家 NBT 序列化版本差异极大 |
-| `pl.runcmd(cmd)` | 见 [命令](commands.md) |
+| `pl.runcmd(cmd)` | 见 [命令](commands) |

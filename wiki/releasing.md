@@ -12,7 +12,7 @@
 | `dev` | 日常开发，只有这里提交 |
 | `main` | 稳定分支，只接受发布合并 |
 
-日常提交只进 `dev`（见 [PROJECT_RULES.md](../PROJECT_RULES.md)）。
+日常提交只进 `dev`（见 [PROJECT_RULES.md](PROJECT_RULES)）。
 用户说「发布版本」时才合并到 `main`。
 
 ## 一条命令发布
